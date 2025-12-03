@@ -5,6 +5,7 @@
 ### Index
 
 * [Naming Scheme](https://github.com/magiccodingman/MagicQuant-Wiki/blob/main/docs/naming-scheme.md) - Learn about the MagicQuant naming scheme which helps shorten lengthy names.
+* [Precision Loss Guide](https://github.com/magiccodingman/MagicQuant-Wiki/tree/main/docs) - A guide to understanding precision loss and the philosophy behind this project.
 * [HuggingFace: Magic Quant Collection](https://huggingface.co/collections/magiccodingman/magic-quant) - The best of the best quants.
 
 ---
