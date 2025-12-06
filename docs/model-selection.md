@@ -1,5 +1,10 @@
 # **MagicQuant Philosophy & Model Selection**
 
+
+> MagicQuant is not the hybrid.
+> 
+> MagicQuant is the verdict.
+
 MagicQuant isn’t just a quantizer.
 It’s a **belief system** about how quantization *should* be done—and a giant middle finger to the idea of “blindly posting GGUF models because that’s just what people do.”
 
