@@ -1,5 +1,8 @@
 # **MagicQuant Hybrid Naming Scheme (Short & Practical Guide)**
 
+> MagicQuant is not the hybrid.
+> MagicQuant is the verdict
+
 MagicQuant produces hybrid quantization models where different parts of the network receive different quant schemes (e.g., MXFP4 base with BF16 embeddings, IQ4_NL attention layers, etc.).
 
 A full tensor-by-tensor representation would be unreadable as a filename, so MagicQuant uses a **compact, modular naming scheme**:
