@@ -2,6 +2,7 @@
 
 
 > MagicQuant is not the hybrid. 
+
 > MagicQuant is the verdict.
 
 MagicQuant isn’t just a quantizer.
