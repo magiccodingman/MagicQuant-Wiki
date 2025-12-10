@@ -4,7 +4,7 @@
 
 Quantization is a powerful way to shrink and accelerate large language models, but it always comes at a cost. That cost is **precision loss**: a measurable drift between how a quantized model behaves compared to its original BF16/F16 version.
 
-In MagicQuant, precision loss isn’t an abstract concept or a marketing buzzword. It is a **hard quality metric**, and it determines what models qualify for inclusion in the MagicQuant benchmark set.
+> "Precision Loss" is the referred statement for the the perplexity drift % (aka: PPL Delta percentage) which utilizes the llama.cpp tool for measurement.
 
 **MagicQuant rejects any quantization with more than 5% precision loss.**
 This does *not* mean >5% loss is useless. What it means is: it no longer meets the quality guarantees this project exists to provide.
