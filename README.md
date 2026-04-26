@@ -124,8 +124,6 @@ MagicQuant is built around transparency, honesty, maintainability, and most impo
 
 That said, the system is designed to adapt. Edge cases can exist, but the architecture is intentionally flexible to handle them.
 
-Finally, everything, from how winners are selected to how the prediction system works, is fully documented. The intent is for MagicQuant to be understandable, reproducible, and above all, trustworthy.
-
 ### How MagicQuant Works
 
 ```
