@@ -69,6 +69,43 @@ The table below breaks down these MagicQuant hybrids by tensor group, showing th
 | MQ-Q4_K_M_1 | Q8_0       | Q5_K   | Q8_0    | Q6_K        | IQ4_XS      | IQ4_XS   |
 
 ---
+
+## Nonlinear Wins
+
+MagicQuant does not look for simple "winners" in sub space between baselines. Instead it only allows nonlinear trade wins. Documentation presented later goes further into detail on this subject, but here's the TLDR:
+
+Imagine a graph like this:
+```
+Size  → 
+|
+|        Q6
+|      /
+|    /
+|  Q5
+| /
+|Q4
++----------------
+```
+
+A nonlinear win looks like:
+```
+        Q6
+      /
+    /    ← MQ-Q5_K_1 (above the line)
+  Q5
+ /
+Q4
+```
+
+That hybrid sits above the straight line between Q4 and Q5.
+
+Meaning:
+👉 It’s a **more efficient trade** than the normal step-up
+
+This is what MagicQuant calls a "nonlinear trade/win" when such wordage is used.
+
+---
+
 ## Deeper Understanding
 
 **Deep Dive Documentation**:
