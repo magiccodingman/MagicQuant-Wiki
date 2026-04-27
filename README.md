@@ -108,11 +108,7 @@ This is what MagicQuant calls a "nonlinear trade/win" when such wordage is used.
 
 ## Deeper Understanding
 
-**Deep Dive Documentation**:
-* [Bad Trades, Early Pruning, and Search-Space Collapse](https://github.com/magiccodingman/MagicQuant-Wiki/blob/main/docs/Bad-Trades-And-Early-Pruning.md)
-* [Learning From Existing Quantizations (Tensor Configuration Sources)](https://github.com/magiccodingman/MagicQuant-Wiki/blob/main/docs/Learning-From-Existing-Quantizations.md)
-* [Nonlinear Winners and Survivor Selection](https://github.com/magiccodingman/MagicQuant-Wiki/blob/main/docs/Nonlinear-Winners-And-Survivors.md)
-* [Prediction Engine](https://github.com/magiccodingman/MagicQuant-Wiki/blob/main/docs/Prediction-Engine.md)
+For a deeper dive into MagicQuant and how it works, the [wiki index](https://github.com/magiccodingman/MagicQuant-Wiki/blob/main/wiki/index.md) is a good place to start.
 
 When you see a MagicQuant hybrid, it’s not just a “Q4.5” sitting somewhere between Q4 and Q5. It represents a discovered configuration where the **KLD reduction is non-linear relative to the size increase**, a genuinely better trade space. Not universally “better” than everything else, but a variant that earned its place through measurable advantage.
 
