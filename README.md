@@ -2,11 +2,6 @@
 
 **MagicQuant is a benchmark-driven GGUF evaluation and hybrid-discovery system.**  
   
-It does not invent new quantization methods.  
-It tests them, compares them, mixes them when useful, and **judges what deserves to survive**.  
-  
-MagicQuant exists to answer a simple question:  
-  
 > **Which quantized models are actually worth using at each size?**  
   
 Most quant releases give you a pile of files, AKA: Q8, Q6, Q5, Q4, and leave you to guess. MagicQuant replaces that guesswork with benchmarks, tensor-group probing, mixed hybrid GGUF builds when they are worth it, and a final survivor list built around meaningful size/fidelity tradeoffs.

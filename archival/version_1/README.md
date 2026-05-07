@@ -121,7 +121,7 @@ But here's what's crucial to understand. "Meaningful" I'm defining as outside of
 
 The quantization space is much more linear. Q8_0 is likely to do better than Q6_K (if Q8_0 was measured to be better in isolation in X group vs Q6_K I mean). This seems obvious, but MagicQuant v1.0 spent a long time trying to brute force reality to see if this truth wasn't as strict as was made out to be.
 
-And MagicQuant v2.0 assisted in confirming that this weirdness exists, but it also put the nail in the coffin for the idea of chasing these weird combo's through an evolutionary system.
+And MagicQuant v2.0 assisted in confirming that this weirdness exists, but it also put the nail in the coffin for the idea of chasing these weird combo's through an evolutionary system. Version 2.0 did discover ways eventually to smoke test and find this weirdness when present and meaningful. But it's an exception, not the standard/rule.
 
 Even if MagicQuant v1.0 didn't have the design flaws, it still showcased interesting things. PPL is weird, it's not as linear as KLD mind you. PPL is very very weird.
 

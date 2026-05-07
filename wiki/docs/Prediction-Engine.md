@@ -1,240 +1,50 @@
 # MagicQuant Prediction Engine
 
-## Isolation-Based Rank-Safe Damage Estimation
+## Rank-Safe Isolation Prediction, Practical Gravity, and Contextual Anomaly Learning
 
-MagicQuant is not trying to be omniscient.
+MagicQuant is a **prediction-guided validation system** for GGUF hybrid quantization. It measures a small number of physically real tensor-group samples, uses those samples to build a rank-safe prediction space, searches that compressed space for candidates that could meaningfully improve the final frontier, then builds and benchmarks only the candidates that deserve a real test.
 
-It is trying to do something more useful: take an impossibly large quantization search space, learn the physical behavior of that model from a small set of real isolated measurements, predict where the meaningful trade spaces are likely to be, and spend expensive full benchmarks only where the prediction has a real chance of changing the final downloadable model set.
+The main path is the DuckDB/rank-safe prediction engine. A newer secondary path, the **smart baseline-tuning fallback**, runs only after a normal dominance, premium, or interior discovery attempt fails to validate a winner. That fallback does not pretend to out-predict the full engine. It uses the same isolated measurements more conservatively, looking for small MDA-backed “free lunch” swaps and tightly budgeted protection trades that may have been intentionally pruned away from the main prediction space.
 
-That distinction matters.
+The prediction engine is allowed to be approximate because it is not the final judge. Its job is to decide where compute should be spent. The real benchmark remains the final authority.
 
-MagicQuant does not claim:
+The system is built around a practical belief:
 
-> “This predicted KLD is always exactly right.”
+> Most quantization behavior follows gravity. When you lower fidelity, damage usually increases. When a candidate appears to violate that rule, the violation must be tested, scoped, and either rejected as normal gravity or learned as a contextual exception.
 
-MagicQuant claims:
-
-> “This prediction is good enough to decide where reality is worth checking.”
-
-And then MagicQuant checks.
-
-If the real benchmark fails the required outcome, the candidate is rejected. It does not survive because it was close. It does not survive because the prediction was elegant. It does not survive because the math liked it. The real benchmark owns the final truth.
-
-The prediction engine is therefore best understood as a **search-space compression engine**, not a final authority. It converts trillions, billions, or millions of possible tensor-group quantization combinations into a much smaller list of candidates that are worth physically building and benchmarking.
-
-That is the heart of MagicQuant:
-
-> Predict aggressively.  
-> Validate brutally.  
-> Publish only survivors.
+That is the philosophy behind the current engine.
 
 ---
 
-# 1. The Core Philosophy: Do Not Fight for Pennies
+## Table of Contents
 
-The modern MagicQuant pipeline was built around a hard-earned observation:
-
-Most of the quantization search space is not worth fighting over.
-
-That sounds almost heretical at first, because hybrid quantization is full of deliciously weird nonlinear behavior. Sometimes a lower-bit quant wins in a specific tensor group. Sometimes two groups interact in a way that makes a combination better than expected. Sometimes a smaller quantization choice fits a tensor group’s distribution better than a larger one.
-
-Those effects are real.
-
-But most of the time, they are either:
-
-1. predictable from isolated samples,
-    
-2. too small to matter,
-    
-3. within measurement noise,
-    
-4. not large enough to change the final Pareto frontier,
-    
-5. or rejected by real validation anyway.
-    
-
-MagicQuant’s philosophy is not “nonlinear behavior does not exist.”
-
-MagicQuant’s philosophy is:
-
-> Nonlinear behavior exists, but not all nonlinear behavior deserves combinatoric tribute.
-
-That is the “do not fight for pennies” rule.
-
-A system can waste enormous time chasing a tiny local inversion that technically exists but does not produce a meaningful downloadable model. MagicQuant instead tries to identify the combinations that are likely to be meaningful: lower KLD at the same or smaller size, better-than-linear interior tradeoffs, or genuinely useful size/fidelity gaps between anchors.
-
-The prediction engine exists to find those opportunities.
-
-The validation system exists to make sure they are real.
+1. [The One-Page Mental Model](#the-one-page-mental-model)
+2. [Vocabulary](#vocabulary)
+3. [Two Worlds: Prediction Space vs. Real Benchmark Truth](#two-worlds-prediction-space-vs-real-benchmark-truth)
+4. [Tensor Groups and Effective Quantization](#tensor-groups-and-effective-quantization)
+5. [MagicQuant Gravity: The Monotonic Degradation Assumption](#magicquant-gravity-the-monotonic-degradation-assumption)
+6. [The Normal Isolation System](#the-normal-isolation-system)
+7. [The Additive KLD Predictor](#the-additive-kld-predictor)
+8. [Predicted Size](#predicted-size)
+9. [Bit-Stress Interaction Fitting](#bit-stress-interaction-fitting)
+10. [Rank-Safe Projection with PAVA](#rank-safe-projection-with-pava)
+11. [Prediction Confidence](#prediction-confidence)
+12. [DuckDB Materialization](#duckdb-materialization)
+13. [Bad Trades and Search-Space Pruning](#bad-trades-and-search-space-pruning)
+14. [Candidate Selection: How a Hybrid Earns a Real Benchmark](#candidate-selection-how-a-hybrid-earns-a-real-benchmark)
+15. [Smart Baseline-Tuning Fallback: Conservative Free-Lunch Search](#smart-baseline-tuning-fallback-conservative-free-lunch-search)
+16. [Anomaly Detection: Respecting Violations of Gravity](#anomaly-detection-respecting-violations-of-gravity)
+17. [How Anomaly Rules Adjust Prediction Space](#how-anomaly-rules-adjust-prediction-space)
+18. [The Qwen3.6-27B Q8 vs Q6 Example](#the-qwen36-27b-q8-vs-q6-example)
+19. [Repeatable Algorithm](#repeatable-algorithm)
+20. [What MagicQuant Claims, and What It Does Not Claim](#what-magicquant-claims-and-what-it-does-not-claim)
+21. [Reimplementation Checklist](#reimplementation-checklist)
 
 ---
 
-# 2. The Monotonic Degradation Assumption
+# The One-Page Mental Model
 
-## 2.1 What MDA Means
-
-The **Monotonic Degradation Assumption**, or **MDA**, is the foundation of MagicQuant’s prediction engine.
-
-The name sounds fancy, but the core idea is simple:
-
-> If every part of a model is held constant except one tensor group, and that tensor group is changed from a higher-fidelity quantization to a lower-fidelity quantization, the lower-fidelity version is expected to have equal or worse KLD most of the time.
-
-For example, imagine a model has seven active tensor groups.
-
-You randomly choose a complete hybrid configuration:
-
-```text
-embeddings  = Q8_0
-attn_q      = IQ4_XS
-attn_kv     = Q6_K
-attn_output = Q8_0
-ffn_up_gate = IQ4_XS
-ffn_down    = Q6_K
-lm_head     = native/exact
-```
-
-Now freeze six of those groups.
-
-Only one group is allowed to change.
-
-For example:
-
-```text
-attn_output = Q8_0
-```
-
-versus:
-
-```text
-attn_output = Q6_K
-```
-
-The MDA says that, in most contexts, the Q8_0 version should have equal or lower KLD than the Q6_K version.
-
-Not always.
-
-Most.
-
-That “most” is where the whole philosophy lives.
-
-## 2.2 MDA Is Not a Hard Law
-
-MDA is not a universal law of physics.
-
-It is an empirical operating assumption.
-
-There are real exceptions. Sometimes Q6_K can beat Q8_0 in a specific tensor group under a specific surrounding combination. Sometimes a lower-bit quantization produces a distribution that better fits a tensor group. Sometimes KLD shifts in tiny ways that are measurable but not practically decisive.
-
-MagicQuant does not deny those cases.
-
-It classifies them.
-
-The important distinction is:
-
-```text
-Unexpected does not automatically mean important.
-```
-
-A lower-bit quant beating a higher-bit quant by `0.000001` KLD may be mathematically interesting, but it may not matter to the final model list. If that difference is inside measurement noise, or if it does not change survivor ranking, or if the resulting file does not earn a meaningful size/fidelity slot, MagicQuant should not burn the universe to chase it.
-
-That is the practical meaning of MDA.
-
-## 2.3 The Observed Pattern
-
-Across large-scale MagicQuant sampling, the monotonic pattern is extremely strong.
-
-In your phrasing:
-
-> If six tensor groups are locked and the seventh group compares Q8_0 against Q6_K, Q8_0 beats Q6_K about 98.4% of the time.
-
-That is the key empirical insight.
-
-The remaining ~1.6% is where things get interesting. But most of that unexpected region tends to fall inside noise or near-noise. A much smaller fraction contains measurable inversions where the lower-bit option genuinely wins.
-
-Those inversions matter as evidence that nonlinear quantization behavior exists.
-
-They do not automatically matter enough to dominate the final pipeline.
-
-The prediction engine is designed around that reality.
-
----
-
-# 3. What MagicQuant Is Actually Predicting
-
-MagicQuant predicts whether a hybrid quantized model is likely to land in a meaningful region of the size/fidelity frontier.
-
-The main predicted values are:
-
-```text
-predicted size
-predicted KLD
-predicted PPL
-predicted rank / ordering
-predicted gain over a local tradeoff line
-```
-
-But KLD is the star of the show.
-
-## 3.1 KLD as Damage
-
-In MagicQuant documentation, KLD can be thought of as **damage**.
-
-Lower KLD means the quantized model behaves closer to the reference behavior under the benchmark distribution.
-
-Higher KLD means more divergence.
-
-So when the docs say “damage,” they generally mean:
-
-```text
-damage ≈ KLD introduced by quantization
-```
-
-This does not mean KLD captures every kind of quality loss. It does not mean KLD perfectly predicts subjective model feel. It does not mean KLD replaces human testing.
-
-But KLD is highly useful because it gives MagicQuant a stable numerical signal for comparing quantization choices under controlled benchmark conditions.
-
-## 3.2 The Goal Is Not Merely Low KLD
-
-A model with lower KLD is not automatically a better final output.
-
-Size matters too.
-
-A 4.0 GB model with KLD `0.0013` and a 3.99 GB model with KLD `0.00131` are probably not meaningfully different to users. Likewise, a 2.41 GB hybrid that is slightly worse than a baseline at the same size does not deserve to survive just because it is fancy.
-
-MagicQuant cares about the frontier:
-
-```text
-For the size paid, did the model earn the damage level it achieved?
-```
-
-This is why the pipeline compares candidates against:
-
-1. strict dominance,
-    
-2. nearby baseline replacement,
-    
-3. interior better-than-linear tradeoff opportunities,
-    
-4. final dominance,
-    
-5. and meaningful spacing.
-    
-
-The prediction engine is only useful because it feeds into this stricter survival system.
-
----
-
-# 4. The Isolation Sampling Strategy
-
-MagicQuant does not try to understand the whole combinatoric space directly.
-
-That would be brutal.
-
-Instead, it learns how each tensor group behaves when isolated.
-
-## 4.1 Tensor Groups
-
-A model is divided into major tensor groups such as:
+Imagine you have a model split into major tensor groups:
 
 ```text
 embeddings
@@ -248,1003 +58,1226 @@ moe_experts
 moe_router
 ```
 
-Not every architecture uses every group. Unused groups are ignored for that model.
-
-A hybrid configuration can be thought of as:
+A naive hybrid quantization engine might try every possible combination:
 
 ```text
-base quant + optional group-specific overrides
+Q choices per group, G groups => Q^G combinations
 ```
+
+That explodes immediately.
+
+MagicQuant does something more practical.
+
+It asks:
+
+```text
+What happens if I quantize only this group?
+What happens if I quantize only that group?
+What does each group cost when isolated?
+```
+
+Then it builds a predictive map.
+
+The map is not reality. The map is a controlled prediction space. It gives each candidate a predicted size, predicted KLD, confidence, and rank.
+
+From there, MagicQuant asks sharper questions:
+
+```text
+Can this candidate strictly dominate an existing anchor?
+Can it replace a nearby baseline with enough KLD improvement?
+Can it land between two anchors and beat the boring linear tradeoff line?
+Can a small guarded fallback recover an isolation-proven free lunch if the main prediction path finds nothing?
+Can it expose a real anomaly where lower-bit choices beat their higher-bit twins?
+```
+
+If a candidate passes prediction-space selection, it is physically built and benchmarked.
+
+If the real benchmark fails, the candidate dies.
+
+If it succeeds, it joins the real frontier and may eliminate other artifacts by strict dominance or meaningful spacing.
+
+That is MagicQuant:
+
+```text
+Measure local physics.
+Predict the frontier.
+Try guarded free lunches only when prediction fails.
+Probe suspicious violations.
+Validate in reality.
+Publish only survivors.
+```
+
+---
+
+# Vocabulary
+
+## Real benchmark truth
+
+A physically built GGUF file that was benchmarked. This includes real KLD, PPL, size, and metadata. Real benchmark truth is authoritative.
+
+## Prediction space
+
+The internal coordinate system used to rank candidate combinations before building them. Prediction-space KLD is not promised to equal final real KLD. It is a **relative damage coordinate** used for candidate ordering.
+
+## Tensor group
+
+A logical family of tensors, such as `attn_q`, `attn_kv`, `ffn_down`, or `moe_experts`.
+
+## Active group
+
+A tensor group that exists in the current architecture and participates in search.
+
+For example, a dense model may not use `moe_experts` or `moe_router`. A hybrid architecture may have unusual SSM or attention layouts. MagicQuant operates on the active tensor group profile for the current architecture.
+
+## Base quant
+
+The default quantization used by a candidate unless a tensor group overrides it.
+
+## Group override
+
+A tensor group-specific quantization choice.
 
 For example:
 
 ```text
 base        = Q8_0
+ffn_down    = Q6_K
+attn_output = Q8_0
+```
+
+Here, `ffn_down` explicitly uses `Q6_K`; any group without an explicit override inherits the base quant.
+
+## Effective quant
+
+The actual quantization state a group ends up using after base inheritance is resolved.
+
+```text
+effective_quant(group, candidate) =
+    group override, if present
+    otherwise candidate base quant
+```
+
+## Anchor
+
+A known reference point on the size/KLD frontier. Anchors can be pure baselines, external baselines, or validated MagicQuant hybrids.
+
+## Strict dominance
+
+A candidate strictly dominates an anchor if it is no larger and has lower real KLD.
+
+```text
+candidate.size <= anchor.size
+candidate.kld  < anchor.kld
+```
+
+## Interior better-than-linear candidate
+
+A candidate between two anchors that beats the straight-line KLD tradeoff between those anchors.
+
+This matters because being “between” two models is not enough. A candidate must be better than the boring interpolation to earn a slot.
+
+## Gravity
+
+MagicQuant’s practical name for the normal expected direction of quantization damage.
+
+Higher-fidelity quantization usually has equal or lower KLD than lower-fidelity quantization when the rest of the context is held constant.
+
+## Anomaly
+
+A validated contextual violation of gravity.
+
+For example, a lower-bit candidate may be smaller and have lower KLD than a higher-bit twin in the same quantized context. MagicQuant treats that as an exception to learn, not as proof that gravity no longer exists.
+
+## Baseline blanket
+
+A uniform baseline state used by the smart fallback.
+
+For example, if the anchor is a pure `UD-Q4_K_XL`-style learned baseline, the smart fallback starts with every active group effectively using that same baseline state:
+
+```text
+embeddings   = UD-Q4_K_XL
+lm_head      = UD-Q4_K_XL
+attn_q       = UD-Q4_K_XL
+attn_kv      = UD-Q4_K_XL
+attn_output  = UD-Q4_K_XL
+ffn_up_gate  = UD-Q4_K_XL
+ffn_down     = UD-Q4_K_XL
+```
+
+Then it considers isolated group swaps against that blanket.
+
+The smart fallback only starts from pure or uniform anchors. It does not begin from an already non-uniform hybrid, because then the fallback would no longer know whether a swap is a clean local improvement or a tangled interaction with an existing hybrid pattern.
+
+## Smart baseline-tuning fallback
+
+A conservative post-failure candidate generator.
+
+It runs after a normal strict dominance, near-baseline, or interior prediction window fails to validate a winner. It does not query the main DuckDB prediction rows. It uses SQLite benchmark truth, base-only anchors, and single-group isolation samples to build a small number of guarded candidate plans.
+
+Its guiding question is:
+
+```text
+If prediction-space cheese found nothing,
+can isolated truth still show a same-size, smaller, or tightly budgeted protection trade worth trying?
+```
+
+## Free lunch
+
+A group swap whose isolated measurement is both better in KLD and same-size-or-smaller relative to the blanket group state.
+
+Shape:
+
+```text
+candidateGroup.size <= blanketGroup.size
+candidateGroup.kld  <  blanketGroup.kld - epsilon
+```
+
+A free lunch is not assumed to be a guaranteed global win. It is only a very cheap reason to build one more candidate when the normal prediction path has failed.
+
+## Brain protection
+
+A premium/interior fallback pattern where MagicQuant spends a small allowed size budget protecting one or more disproportionately sensitive groups.
+
+This is less certain than strict free lunch. It is a controlled gamble:
+
+```text
+This group costs bytes,
+but isolated truth says it prevents a lot of damage,
+and the requested size window still has room.
+```
+
+Brain protection is how the fallback can sometimes discover nonlinear premium or interior winners that the main prediction space did not select.
+
+---
+
+# Two Worlds: Prediction Space vs. Real Benchmark Truth
+
+This distinction is the spine of the whole system.
+
+MagicQuant has two worlds:
+
+```text
+1. Prediction space
+2. Real benchmark truth
+```
+
+They are related, but they are not the same thing.
+
+## Real benchmark truth is final
+
+A real benchmark answers:
+
+```text
+What actually happened after this GGUF was built and benchmarked?
+```
+
+Real benchmark truth includes:
+
+```text
+actual size
+actual KLD
+actual PPL
+actual PPL delta
+actual tensor mapping
+actual benchmark category
+actual imatrix context
+```
+
+If a candidate fails real validation, it does not survive.
+
+## Prediction space is for ranking
+
+Prediction space answers:
+
+```text
+Based on measured local behavior, which candidates are worth physically testing?
+```
+
+Prediction-space KLD is not supposed to be a perfect literal forecast of the final benchmark KLD.
+
+It is better understood as:
+
+```text
+relative predicted damage coordinate
+```
+
+The prediction engine can be numerically imperfect and still be excellent if it ranks the right candidates high enough to test.
+
+That is why MagicQuant can say:
+
+```text
+This predicted KLD may not be the final real KLD,
+but this candidate is worth validating.
+```
+
+Then the real benchmark decides.
+
+## Why this matters
+
+If you misunderstand this, the whole system looks stranger than it is.
+
+For example, MagicQuant may use an additive KLD model where several isolated KLD values are summed together. That sum is not claiming:
+
+```text
+The final model will exactly have this KLD.
+```
+
+It is claiming:
+
+```text
+Relative to other candidates in the same prediction bucket,
+this candidate appears less or more damaged.
+```
+
+That is enough to guide search.
+
+The final truth is always benchmarked.
+
+---
+
+# Tensor Groups and Effective Quantization
+
+MagicQuant does not reason about every tensor independently during candidate search. It groups tensors into architecture-aware buckets.
+
+Common groups include:
+
+```text
+embeddings
+lm_head
+attn_q
+attn_kv
+attn_output
+ffn_up_gate
+ffn_down
+moe_experts
+moe_router
+```
+
+Not every architecture has every group. Unused groups are forced out of the active search space.
+
+A candidate can be represented as:
+
+```text
+candidate = base quant + optional group overrides
+```
+
+Example:
+
+```text
+base        = Q8_0
 embeddings  = Q8_0
-attn_kv     = Q8_0
-attn_output = Q6_K
+lm_head     = Q8_0
 attn_q      = IQ4_XS
-ffn_up_gate = IQ4_XS
-ffn_down    = IQ4_NL
+attn_kv     = Q5_K
+attn_output = Q8_0
+ffn_up_gate = Q6_K
+ffn_down    = Q5_K
 ```
 
-If a group has no explicit override, it inherits the base quant.
-
-## 4.2 Effective Quantization
-
-For every tensor group `g`, MagicQuant determines an **effective baseline**:
+The prediction engine does not care merely what is written as an override. It cares about the **effective** quantization state:
 
 ```text
-effective(g, combo) =
-    group override if one exists
-    otherwise combo base quant
-```
-
-So if the base quant is Q6_K and `attn_output` has no override, then:
-
-```text
-effective(attn_output) = Q6_K
-```
-
-If the base quant is Q6_K but `attn_output = Q8_0`, then:
-
-```text
-effective(attn_output) = Q8_0
-```
-
-This matters because prediction is based on the final effective quantization state of each group, not just the written override list.
-
-## 4.3 The Q8 Carrier
-
-MagicQuant uses a Q8 carrier isolation strategy.
-
-The idea is:
-
-1. Build a Q8-based model.
-    
-2. Hold every active tensor group at native/exact precision, such as BF16/F16/native exact depending on the run.
-    
-3. Change exactly one tensor group to the target quantization.
-    
-4. Benchmark the result.
-    
-5. Store the measured KLD and size behavior for that group/quant pair.
-    
-
-This creates a single-group isolation measurement:
-
-```text
-isolation_damage(group, quant)
-```
-
-For example:
-
-```text
-isolation_damage(attn_output, Q6_K)
-isolation_damage(attn_output, Q8_0)
-isolation_damage(ffn_down, IQ4_XS)
-isolation_damage(attn_kv, Q5_K)
-```
-
-These measurements become the physical data layer of the prediction engine.
-
-## 4.4 Why Isolation Works
-
-Isolation works because tensor-group damage is often approximately additive.
-
-If damaging `attn_q` by itself causes some amount of KLD shift, and damaging `ffn_down` by itself causes another amount, then damaging both together often lands near the sum of those effects.
-
-Not perfectly.
-
-But often enough to be powerful.
-
-That is the crack in the combinatoric wall.
-
-MagicQuant exploits that crack.
-
-Instead of benchmarking every possible hybrid combination, it benchmarks a carefully chosen set of isolated tensor-group behaviors and uses those measurements to predict large regions of the combination space.
-
----
-
-# 5. The Three-Layer Prediction Stack
-
-The old validator names these layers M1, M4, and M5.
-
-This documentation uses clearer names:
-
-|Old validator name|Documentation name|Purpose|
-|---|---|---|
-|M1|**Isolation Additive Backbone**|Stable rank backbone based on summed isolated damage|
-|M4|**Bit-Stress Interaction Estimator**|Numeric correction for low-bit cross-group compounding|
-|M5|**Rank-Safe Projection**|Final monotone projection that keeps the rank discipline of the additive backbone while preserving as much interaction accuracy as possible|
-
-The important pair is:
-
-```text
-Isolation Additive Backbone + Rank-Safe Projection
-```
-
-The first gives MagicQuant a stable physical ordering.
-
-The second prevents the interaction model from making locally chaotic ranking claims.
-
-Together, they form the practical prediction engine.
-
----
-
-# 6. Layer One: Isolation Additive Backbone
-
-## 6.1 Purpose
-
-The **Isolation Additive Backbone** is the simplest and most important estimator.
-
-It asks:
-
-> If every tensor group contributes its isolated KLD damage independently, what is the total predicted damage of this hybrid?
-
-This is the rank spine of the prediction engine.
-
-It is not always the most numerically accurate layer, but it is usually extremely good at ordering combinations.
-
-## 6.2 Definitions
-
-Let:
-
-```text
-G = set of active tensor groups
-c = a candidate hybrid configuration
-e_g(c) = effective quantization for group g in candidate c
-D(g, q) = isolated measured KLD damage for group g at quant q
-```
-
-Some effective states are treated as zero-damage aliases:
-
-```text
-Q8_0
-native exact
-BF16 exact
-F16 exact
-```
-
-In the current prediction model, Q8_0 is treated as the practical carrier floor for marginal damage. Native/exact aliases are also zero because they are not contributing quantization damage in the isolated sense.
-
-So:
-
-```text
-D(g, Q8_0) = 0
-D(g, native/exact) = 0
-D(g, BF16/F16 exact) = 0
-```
-
-For all other quantizations, MagicQuant looks up the isolated measurement:
-
-```text
-D(g, q) = measured KLD from the Q8-carrier single-group isolation
-```
-
-## 6.3 Formula
-
-The additive prediction is:
-
-```text
-A(c) = Σ D(g, e_g(c))
-       over all active tensor groups g
-```
-
-Expanded:
-
-```text
-predicted_additive_kld(candidate)
-    =
-    damage(embeddings,  effective_embeddings)
-  + damage(lm_head,     effective_lm_head)
-  + damage(attn_q,      effective_attn_q)
-  + damage(attn_kv,     effective_attn_kv)
-  + damage(attn_output, effective_attn_output)
-  + damage(ffn_up_gate, effective_ffn_up_gate)
-  + damage(ffn_down,    effective_ffn_down)
-  + damage(moe_experts, effective_moe_experts)
-  + damage(moe_router,  effective_moe_router)
-```
-
-Groups not present in the architecture are ignored.
-
-Groups at Q8/native/exact contribute zero.
-
-Groups with missing isolation data make the candidate unsafe or incomplete for prediction.
-
-## 6.4 Why This Works
-
-The additive model works because most quantization damage behaves approximately monotonically and approximately independently at the tensor-group level.
-
-It is not perfect.
-
-But it captures a huge amount of the useful signal.
-
-The additive backbone is especially important for ranking because it is conservative. It does not invent complex interaction stories. It says:
-
-> “Based on isolated physical measurements, this combination should be less damaged than that one.”
-
-That is a powerful baseline.
-
-## 6.5 The Role of MDA
-
-The Isolation Additive Backbone is where the MDA becomes operational.
-
-If Q8_0 isolated damage is lower than Q6_K isolated damage for `attn_output`, then the additive backbone generally assumes Q8_0 is the safer choice for `attn_output` across combinations.
-
-That assumption can miss nonlinear inversions.
-
-But the data says it is overwhelmingly right in practical ranking terms.
-
-And when it is wrong, MagicQuant’s validation layer catches the important cases that are actually tested.
-
----
-
-# 7. Layer Two: Bit-Stress Interaction Estimator
-
-## 7.1 Purpose
-
-The additive backbone is stable, but it is intentionally simple.
-
-Quantization damage is not always perfectly additive. Low-bit choices can interact. Two mildly damaged groups may combine into more damage than either isolation measurement suggests.
-
-The **Bit-Stress Interaction Estimator** adds a learned correction term for this.
-
-It asks:
-
-> When multiple groups are pushed into low-bit territory together, how much extra interaction damage should be expected?
-
-## 7.2 Bit Stress
-
-Each quantization has an approximate bit range.
-
-For example:
-
-```text
-Q8_0  ≈ 8-bit
-Q6_K  ≈ 6-bit
-Q5_K  ≈ 5-bit
-Q4_K  ≈ 4-bit
-IQ4_* ≈ 4-bit-ish
-IQ3_* ≈ 3-bit-ish
-```
-
-MagicQuant chooses a candidate bit-stress threshold `B`.
-
-For each group, stress is:
-
-```text
-stress(g) = max(0, B - bits(e_g))
-```
-
-So if `B = 8`:
-
-```text
-Q8_0  → stress 0
-Q6_K  → stress 2
-Q5_K  → stress 3
-Q4_K  → stress 4
-IQ3_* → stress 5
-```
-
-The lower the bit depth, the higher the stress.
-
-## 7.3 Pairwise Cross-Term
-
-For every pair of active damaged groups, MagicQuant computes a pairwise interaction contribution:
-
-```text
-cross(g, h) =
-    D(g, e_g)
-  × D(h, e_h)
-  × stress(g)
-  × stress(h)
-```
-
-Then sums across all pairs:
-
-```text
-X_B(c) = Σ [D(g, e_g) × D(h, e_h) × stress(g) × stress(h)]
-         for all g < h
-```
-
-This term is zero when groups are not stressed.
-
-It grows when multiple low-bit damaged groups are active together.
-
-## 7.4 Interaction Formula
-
-The interaction prediction is:
-
-```text
-Y(c) = α × A(c) + β × X_B(c)
+e_g(c) = override_g(c) if override exists
+       = base(c)       otherwise
 ```
 
 Where:
 
 ```text
-A(c) = additive backbone prediction
-X_B(c) = bit-stress pairwise cross-term
-α = fitted additive scale
-β = fitted interaction scale
-B = selected bit-stress threshold
+g = tensor group
+c = candidate
 ```
 
-MagicQuant fits `α`, `β`, and the best threshold candidate against existing benchmark truth for the active model/imatrix bucket.
+So if:
 
-This matters: the fit is scoped.
+```text
+base = Q6_K
+attn_output = null
+```
 
-MagicQuant is not blindly applying one universal correction across every architecture, model, and imatrix. It fits within the current prediction context when enough benchmark rows exist.
+then:
 
-## 7.5 Why This Layer Exists
+```text
+e_attn_output(c) = Q6_K
+```
 
-The interaction estimator improves numeric accuracy when the additive backbone underestimates compounding damage.
+If:
 
-This is especially useful in lower-bit regions, where quantization gets spicy.
+```text
+base = Q6_K
+attn_output = Q8_0
+```
 
-Sub-4-bit territory is where things can get especially weird. Damage can stop behaving politely. Measurement noise can become more noticeable. Tensor groups that looked tame in isolation can interact in stranger ways.
+then:
 
-The interaction estimator gives MagicQuant a way to bend the prediction toward measured reality without throwing away the additive backbone.
+```text
+e_attn_output(c) = Q8_0
+```
 
-But it still has a weakness:
+This is critical because MagicQuant predicts behavior from effective group states, not from the cosmetic shape of the candidate string.
 
-> A fitted interaction model can become locally too confident.
+## External and custom baselines
 
-That is why the final projection layer exists.
+External baselines, such as Unsloth Dynamic variants, may be mapped into a normalized baseline identity for prediction lookup when possible.
+
+That does not erase the external artifact’s real benchmark truth.
+
+It simply lets prediction space reuse an isolation library when the external file’s effective tensor behavior corresponds to a known quantization family.
+
+In other words:
+
+```text
+Prediction may normalize for lookup.
+Validation still uses real benchmark truth.
+```
 
 ---
 
-# 8. Layer Three: Rank-Safe Projection
+# MagicQuant Gravity: The Monotonic Degradation Assumption
 
-## 8.1 Purpose
+MagicQuant’s default world model is gravity.
 
-The **Rank-Safe Projection** is the reconciliation layer.
+The formal version is the **Monotonic Degradation Assumption**, or MDA:
 
-It combines:
-
-```text
-the stable ordering of the Isolation Additive Backbone
-```
-
-with:
-
-```text
-the improved numeric estimate of the Bit-Stress Interaction Estimator
-```
-
-It does this by forcing the final prediction to remain monotonic in additive-backbone order.
-
-In plain English:
-
-> If the additive isolation evidence says candidate A should be no worse than candidate B, the final projected prediction is not allowed to say B is clearly better than A unless they collapse into a tied plateau.
-
-That is the stabilizer.
-
-## 8.2 Sort Order
-
-MagicQuant sorts predictable candidates by:
-
-```text
-additive predicted KLD
-then interaction predicted KLD
-then predicted size
-```
-
-The Python validator version sorts by additive prediction and interaction prediction. The C# implementation also includes predicted size as an additional tie-breaker.
-
-The primary key is the additive backbone.
-
-That means the final prediction treats additive isolation order as the rank spine.
-
-## 8.3 Optimization Problem
-
-Let:
-
-```text
-A_i = additive prediction for candidate i
-Y_i = interaction prediction for candidate i
-Z_i = final rank-safe projected prediction
-```
-
-Sort candidates so that:
-
-```text
-A_1 ≤ A_2 ≤ A_3 ≤ ... ≤ A_n
-```
-
-The Rank-Safe Projection solves:
-
-```text
-minimize Σ (Z_i - Y_i)^2
-
-subject to:
-
-Z_1 ≤ Z_2 ≤ Z_3 ≤ ... ≤ Z_n
-```
-
-In words:
-
-> Find the final prediction sequence that stays as close as possible to the interaction estimator while never violating the additive backbone order.
-
-This is classical isotonic regression.
-
-MagicQuant computes it with the **Pool Adjacent Violators Algorithm**, or PAVA.
-
-## 8.4 What PAVA Does
-
-PAVA walks through the interaction predictions in additive order.
-
-If the interaction predictions are already monotonic, nothing changes.
+> If the surrounding context is held constant, moving a tensor group from a higher-fidelity quantization to a lower-fidelity quantization is expected to produce equal or worse KLD most of the time.
 
 Example:
 
 ```text
-additive order:      A1   A2   A3   A4
-interaction values:  .01  .02  .03  .04
-projected values:    .01  .02  .03  .04
+same candidate context
+same groups
+same benchmark bucket
+only attn_output changes
 ```
 
-No problem.
-
-But if the interaction model violates additive order:
+Gravity expects:
 
 ```text
-additive order:      A1   A2   A3   A4
-interaction values:  .01  .04  .03  .05
+KLD(attn_output = Q8_0) <= KLD(attn_output = Q6_K)
 ```
 
-Then `.04` before `.03` is a violation.
+Most of the time, this is true enough to be useful.
 
-PAVA pools the violating adjacent values:
+But it is not a law of the universe.
+
+It is an engineering prior.
+
+## Gravity is not denial of weirdness
+
+Quantization gets weird.
+
+Sometimes a lower-bit format fits a tensor distribution better. Sometimes a group interacts with another group in a way that cancels damage. Sometimes two bad-looking local decisions produce a surprisingly good global model. Sometimes a lower-bit candidate beats a higher-bit twin by enough to matter.
+
+MagicQuant does not deny this.
+
+It separates the cases:
 
 ```text
-(.04 + .03) / 2 = .035
+normal gravity:
+    lower fidelity is worse or not meaningfully better
+
+noise or tiny inversion:
+    lower fidelity wins by too little to matter
+
+validated anomaly:
+    lower fidelity wins by enough, in context, to change search behavior
 ```
 
-Final:
+The old failure mode would be to either worship every tiny inversion or ignore all inversions.
+
+MagicQuant does neither.
+
+It treats gravity as the default and anomalies as scoped, validated exceptions.
+
+## The practical rule
+
+A violation of gravity must earn attention.
+
+A tiny Q6-over-Q8 win buried in noise does not deserve a combinatoric festival.
+
+A candidate that beats a Q8 anchor by lower size and meaningfully lower KLD absolutely deserves attention.
+
+This is the operating philosophy:
 
 ```text
-projected values:    .01  .035 .035 .05
+Respect gravity until reality proves a violation is meaningful.
+When reality proves it, learn the violation without burning down gravity.
 ```
-
-The disputed region becomes a plateau.
-
-## 8.5 What Plateaus Mean
-
-A plateau is not a bug.
-
-A plateau is MagicQuant saying:
-
-> “The estimators disagree here, and the honest answer is that this region should be treated as tied or uncertain.”
-
-That is much better than pretending to know the exact ordering of candidates separated by microscopic noisy differences.
-
-A plateau means:
-
-```text
-The interaction estimator wanted to locally reorder candidates.
-The additive backbone did not support that reorder.
-The projection pooled the disputed values.
-```
-
-This is a principled uncertainty signal.
-
-## 8.6 Why This Is Powerful
-
-The Rank-Safe Projection has the perfect personality for this problem:
-
-1. It does not introduce new tensor-group assumptions.
-    
-2. It does not require a new fitted model.
-    
-3. It preserves the practical monotonic structure learned from isolated samples.
-    
-4. It keeps the interaction estimator’s numerical improvements wherever they do not violate rank safety.
-    
-5. It converts disagreement into plateaus instead of fake precision.
-    
-
-This is why the additive backbone and rank-safe projection stabilize each other.
-
-The additive backbone is the skeleton.
-
-The interaction estimator is the muscle.
-
-The rank-safe projection is the nervous system saying:
-
-> “Great, but do not flail.”
 
 ---
 
-# 9. Full Prediction Formula
+# The Normal Isolation System
 
-For a candidate hybrid `c`:
+MagicQuant learns local tensor-group behavior through isolation samples.
 
-## 9.1 Effective Baselines
-
-```text
-e_g(c) =
-    override_g(c), if group g has an explicit override
-    base(c), otherwise
-```
-
-## 9.2 Isolated Damage Lookup
+The normal isolation system uses a carrier setup:
 
 ```text
-D(g, q) =
-    0, if q is Q8_0 or native/exact
-    measured isolated KLD for group g at quant q, otherwise
+base quant = Q8_0
+all active tensor groups = native exact precision
+one tested group = target quant
 ```
 
-## 9.3 Additive Backbone
+Native exact precision means the model’s native exact state for the run, such as BF16/F16/F32 depending on source and conversion.
+
+A base-only isolation anchor looks like:
+
+```text
+base        = Q8_0
+embeddings  = native exact
+lm_head     = native exact
+attn_q      = native exact
+attn_kv     = native exact
+attn_output = native exact
+ffn_up_gate = native exact
+ffn_down    = native exact
+```
+
+A single-group isolation sample looks like:
+
+```text
+base        = Q8_0
+embeddings  = native exact
+lm_head     = native exact
+attn_q      = native exact
+attn_kv     = native exact
+attn_output = native exact
+ffn_up_gate = native exact
+ffn_down    = Q6_K
+```
+
+Everything is held exact except the one tested group.
+
+This creates a measurement:
+
+```text
+D(ffn_down, Q6_K)
+```
+
+The same is repeated for each active group and each relevant quantization target.
+
+## Q8 is not source of truth
+
+This part is subtle but extremely important.
+
+MagicQuant uses Q8 as the **carrier** for isolation logistics and prediction-space structure.
+
+It does not treat Q8 as the source of truth.
+
+The source of truth is always real benchmark truth.
+
+Also, in the current prediction model:
+
+```text
+native exact aliases are zero-damage references
+Q8_0 is not a zero-damage alias
+```
+
+That means:
+
+```text
+D(g, native exact) = 0
+D(g, Q8_0)         = measured isolated Q8 KLD for that group
+D(g, Q6_K)         = measured isolated Q6_K KLD for that group
+```
+
+This matters because Q8 is still quantized. It may be very good, but it is not BF16. MagicQuant therefore scores Q8 from measured Q8 isolation data rather than pretending it has no damage.
+
+## What isolation teaches
+
+Isolation teaches a local marginal behavior:
+
+```text
+When everything else is exact, what does this group/quant choice look like?
+```
+
+This is not enough to explain every nonlinear interaction.
+
+But it is extremely useful.
+
+It gives MagicQuant a stable local physics map:
+
+```text
+D(group, quant)
+S(group, quant)
+PPL(group, quant)
+```
+
+The prediction engine then uses that map to rank full hybrid combinations.
+
+---
+
+# The Additive KLD Predictor
+
+The first prediction layer is additive.
+
+For each active group, MagicQuant finds the group’s effective quantization and looks up the measured isolated KLD for that group/quant pair.
+
+Let:
+
+```text
+G = active tensor groups
+c = candidate configuration
+e_g(c) = effective quantization of group g in candidate c
+D(g, q) = measured isolated KLD for group g using quant q
+```
+
+Then the additive prediction is:
 
 ```text
 A(c) = Σ D(g, e_g(c))
+       for every active group g
 ```
 
-## 9.4 Bit Stress
+Expanded:
+
+```text
+A(c) =
+    D(embeddings,  e_embeddings(c))
+  + D(lm_head,     e_lm_head(c))
+  + D(attn_q,      e_attn_q(c))
+  + D(attn_kv,     e_attn_kv(c))
+  + D(attn_output, e_attn_output(c))
+  + D(ffn_up_gate, e_ffn_up_gate(c))
+  + D(ffn_down,    e_ffn_down(c))
+  + D(moe_experts, e_moe_experts(c))
+  + D(moe_router,  e_moe_router(c))
+```
+
+Unused groups are ignored.
+
+Native exact aliases contribute zero:
+
+```text
+D(g, native exact) = 0
+```
+
+Q8 contributes measured isolation KLD:
+
+```text
+D(g, Q8_0) = measured isolated Q8_0 KLD for group g
+```
+
+If required isolation data is missing, MagicQuant marks the candidate as unsafe or incomplete for prediction. It does not silently invent missing truth.
+
+## Why additive prediction works
+
+Additive prediction works because most tensor-group quantization damage is approximately independent enough to be useful.
+
+Not perfectly independent.
+
+Not magically independent.
+
+Useful.
+
+That is the key.
+
+If `attn_q` causes a little damage and `ffn_down` causes a little damage, then using both often lands somewhere near the sum.
+
+The additive layer gives MagicQuant a conservative rank prior:
+
+```text
+Based on measured isolated group behavior,
+this candidate appears less damaged than that candidate.
+```
+
+It is the backbone of gravity.
+
+## Why additive prediction is not final KLD
+
+The additive number is not the final real KLD.
+
+It is a prediction-space coordinate.
+
+Two reasons:
+
+1. Isolation samples happen in a controlled exact-blanket environment.
+2. Full hybrids contain many simultaneously quantized groups that can interact.
+
+So the additive KLD should be read as:
+
+```text
+relative expected damage from isolated measurements
+```
+
+Not:
+
+```text
+what llama-perplexity will exactly report later
+```
+
+The latter is validated by building and benchmarking the actual GGUF.
+
+---
+
+# Predicted Size
+
+MagicQuant also predicts candidate size.
+
+The size predictor starts from a base-only anchor and adds group-level size deltas.
+
+Let:
+
+```text
+S_base(b) = measured base-only size for base quant b
+S_iso(g, q) = measured single-group isolation size for group g at quant q
+S_q8_exact = measured Q8-carrier exact-blanket size
+```
+
+Then:
+
+```text
+Ŝ(c) = S_base(base(c)) + Σ [S_iso(g, e_g(c)) - S_q8_exact]
+```
+
+For every active group `g`.
+
+Native exact aliases contribute no size delta because the base-only anchor already holds active groups in exact precision.
+
+If size anchors are missing, MagicQuant marks the size prediction unsafe.
+
+This predicted size is used for candidate selection windows, strict dominance checks, local linear line checks, and ranking.
+
+But again:
+
+```text
+Predicted size selects candidates.
+Actual file size validates candidates.
+```
+
+The final survivor metadata uses real materialized size.
+
+---
+
+# Bit-Stress Interaction Fitting
+
+The additive predictor is intentionally simple.
+
+But quantization damage is not always purely additive. Low-bit choices can interact. Two groups that look individually manageable can become worse together.
+
+MagicQuant adds an interaction correction using a bit-stress cross-term.
+
+## Bit stress
+
+Each quantization has an approximate bit range:
+
+```text
+Q8_0  => about 8-bit
+Q6_K  => about 6-bit
+Q5_K  => about 5-bit
+Q4_*  => about 4-bit
+IQ4_* => about 4-bit-ish
+IQ3_* => about 3-bit-ish
+IQ2_* => about 2-bit-ish
+```
+
+MagicQuant tries candidate stress thresholds:
+
+```text
+B ∈ {4, 5, 6, 7, 8, 9, 10, 11, 12}
+```
+
+For each group:
 
 ```text
 stress_B(g, c) = max(0, B - bits(e_g(c)))
 ```
 
-## 9.5 Pairwise Cross-Term
+If `B = 8`, then approximately:
 
 ```text
-X_B(c) =
-    Σ D(g, e_g(c)) × D(h, e_h(c)) × stress_B(g, c) × stress_B(h, c)
-    for all g < h
+Q8_0  => stress 0
+Q6_K  => stress 2
+Q5_K  => stress 3
+Q4_K  => stress 4
+IQ3_* => stress 5
+IQ2_* => stress 6
 ```
 
-## 9.6 Interaction Estimate
+The lower the bit range, the higher the stress.
+
+## Pairwise cross-term
+
+For each pair of active groups, MagicQuant computes:
 
 ```text
-Y(c) = max(0, α × A(c) + β × X_B(c))
+cross_B(g, h, c) =
+    D(g, e_g(c))
+  × D(h, e_h(c))
+  × stress_B(g, c)
+  × stress_B(h, c)
 ```
 
-## 9.7 Rank-Safe Projection
-
-Sort all candidates by:
+Then sums across pairs:
 
 ```text
-A(c), then Y(c), then predicted size
+X_B(c) = Σ cross_B(g, h, c)
+         for every g < h
 ```
 
-Then solve:
+This term grows when multiple damaged low-bit groups appear together.
+
+## Fitting alpha and beta
+
+MagicQuant fits the interaction model against existing real benchmark rows in the current prediction bucket.
+
+The prediction bucket is scoped by things like:
 
 ```text
-Z* = argmin Σ (Z(c) - Y(c))²
-
-subject to:
-
-Z(c_1) ≤ Z(c_2) ≤ ... ≤ Z(c_n)
+architecture family
+tensor group profile
+model hash
+imatrix identity
+benchmark category
 ```
 
-The final predicted KLD is:
+For each benchmarked row `i`, MagicQuant has:
 
 ```text
-PredictedKld(c) = Z*(c)
+actual KLD y_i
+additive prediction A_i
+cross-term X_i
 ```
 
-That final value is what MagicQuant uses for rank-safe candidate selection.
+For each candidate threshold `B`, it fits:
+
+```text
+Y_i = αA_i + βX_i
+```
+
+Using a two-feature least-squares fit.
+
+The normal equations are:
+
+```text
+s11 = Σ A_i²
+s12 = Σ A_iX_i
+s22 = Σ X_i²
+y1  = Σ A_i y_i
+y2  = Σ X_i y_i
+
+det = s11s22 - s12²
+```
+
+If the determinant is usable:
+
+```text
+α = (y1s22 - y2s12) / det
+β = (s11y2 - s12y1) / det
+```
+
+If the fit is degenerate, MagicQuant falls back to an additive-only fit.
+
+To keep noisy early fits from going feral, coefficients are clamped:
+
+```text
+α ∈ [0.05, 10.0]
+β ∈ [-1,000,000, 1,000,000]
+```
+
+For each threshold, MagicQuant computes mean absolute error:
+
+```text
+MAE_B = mean(|max(0, αA_i + βX_i) - y_i|)
+```
+
+The threshold with the best MAE wins.
+
+If too few benchmark rows exist, MagicQuant uses fallback behavior:
+
+```text
+α = 1
+β = 0
+B = default threshold
+```
+
+So the interaction layer becomes additive-only until there is enough local benchmark truth to justify fitting.
+
+## Final interaction estimate
+
+For a candidate `c`, the raw interaction estimate is:
+
+```text
+Y(c) = max(0, αA(c) + βX_B(c))
+```
+
+This is usually more numerically realistic than plain additive prediction, especially in lower-bit territory.
+
+But it is still not allowed to become the final rank authority by itself.
+
+That is where rank-safe projection enters.
 
 ---
 
-# 10. Size Prediction
+# Rank-Safe Projection with PAVA
 
-KLD is only half the story.
+The bit-stress model improves numerical realism, but it can become locally too confident.
 
-MagicQuant also predicts size.
+MagicQuant therefore applies a rank-safe projection.
 
-The size estimator follows a similar isolation idea.
-
-It starts from a base-only exact blanket size anchor, then adds isolated size deltas for each effective group quantization.
-
-Conceptually:
+This is the reconciliation layer between:
 
 ```text
-PredictedSize(c)
-    =
-    base_only_size(base(c))
-  + Σ [isolated_size(g, e_g(c)) - q8_exact_blanket_size]
+gravity from additive isolation evidence
 ```
 
-The reason for subtracting the Q8 exact blanket size is that each group isolation snapshot includes the common carrier structure. MagicQuant wants only the marginal size delta for the group override.
-
-If size prediction is not safe because required isolation size anchors are missing, the candidate can be marked unsafe for selection.
-
-This matters because MagicQuant’s final decision is not:
+and:
 
 ```text
-Did predicted KLD look good?
+fitted interaction correction from benchmark rows
+```
+
+## Sort order
+
+MagicQuant sorts predictable candidates by:
+
+```text
+1. AdditiveKld ascending
+2. InteractionKld ascending
+3. PredictedSizeBytes ascending
+```
+
+The additive prediction is the rank spine.
+
+That means if isolated measurements say candidate A should be safer than candidate B, the final prediction cannot casually invert them just because the interaction fit twitched.
+
+## Projection problem
+
+Let:
+
+```text
+A_i = additive prediction of candidate i
+Y_i = interaction prediction of candidate i
+Z_i = rank-safe projected prediction of candidate i
+```
+
+After sorting by additive prediction:
+
+```text
+A_1 <= A_2 <= A_3 <= ... <= A_n
+```
+
+MagicQuant finds the closest monotonic sequence `Z` to the interaction predictions `Y`:
+
+```text
+minimize Σ (Z_i - Y_i)^2
+subject to Z_1 <= Z_2 <= ... <= Z_n
+```
+
+This is isotonic regression.
+
+MagicQuant computes it with PAVA: the **pool adjacent violators algorithm**.
+
+## What PAVA means in plain language
+
+If the interaction model says:
+
+```text
+candidate 1: 0.010
+candidate 2: 0.008
+```
+
+but additive gravity says candidate 1 should not be worse than candidate 2, that is a violation.
+
+PAVA pools them into a plateau:
+
+```text
+candidate 1: 0.009
+candidate 2: 0.009
+```
+
+The plateau is not a bug.
+
+It is the prediction engine saying:
+
+```text
+I do not have enough stable evidence to separate these two cleanly.
+```
+
+That is exactly what you want.
+
+The model avoids fake precision.
+
+## Final rank-safe KLD
+
+After projection:
+
+```text
+BaseRankSafeKld(c) = Z(c)
+```
+
+This becomes the normal gravity-respecting prediction before anomaly adjustments.
+
+Candidate ranks are then assigned by:
+
+```text
+PredictedKld ascending
+PredictedSizeBytes ascending
+PredictionConfidence descending
+stable slot tie-breakers
+```
+
+This gives MagicQuant a stable prediction order without pretending every tiny difference is gospel.
+
+---
+
+# Prediction Confidence
+
+MagicQuant assigns confidence to prediction rows.
+
+Confidence is not final truth. It is a ranking and diagnostics tool.
+
+Non-hybrid/pure rows can be treated as fully confident because they are anchor-like and not speculative in the same way.
+
+For hybrids, the confidence is reduced when:
+
+1. The fit had too little data.
+2. PAVA had to adjust the interaction estimate heavily.
+3. The candidate lands inside a large plateau.
+
+The core shape is:
+
+```text
+confidence = clamp(
+    baseConfidence
+  × 1 / (1 + adjustmentRatio)
+  × plateauPenalty,
+  0,
+  1
+)
+```
+
+Where:
+
+```text
+adjustmentRatio = |ProjectedKld - InteractionKld| / max(ProjectedKld, 1e-9)
+```
+
+And:
+
+```text
+plateauPenalty = max(0.25, 1 / sqrt(blockCount))
+```
+
+A large PAVA block means many candidates collapsed together. That is useful uncertainty information, so confidence drops.
+
+The base confidence depends on fit maturity:
+
+```text
+fallback fit => lower base confidence
+more fit rows => higher base confidence, capped at 1
+```
+
+Again, confidence does not decide final publication.
+
+It helps order candidates before real validation.
+
+---
+
+# DuckDB Materialization
+
+MagicQuant materializes prediction metadata into DuckDB.
+
+SQLite remains the long-term truth store for real benchmark data. DuckDB is the transient high-throughput search table used for candidate generation, prediction, ranking, and selection.
+
+Each candidate row can receive:
+
+```text
+PredictedKld
+PredictedSizeBytes
+PredictionConfidence
+PredictionRank
+BaseRankSafeKld
+AnomalyAdjustmentKld
+FinalPredictedKld
+```
+
+The materialization process does roughly this:
+
+1. Build the prediction model.
+2. Build lookup tables for group effective states.
+3. Join effective group state to isolation KLD and size deltas.
+4. Compute additive KLD.
+5. Compute predicted size.
+6. Compute bit-stress cross-term.
+7. Compute interaction KLD.
+8. Sort by additive/interactions/size.
+9. Apply PAVA blocks.
+10. Compute prediction confidence.
+11. Persist predicted KLD, size, confidence, rank, and rank-safe base KLD back into DuckDB.
+
+This is important because final selection can query pre-ranked candidates directly from DuckDB instead of loading huge candidate spaces into C# memory.
+
+That is also why the system scales.
+
+MagicQuant is not trying to carry the entire combinatoric universe in memory. It stores a compressed predictive ranking and asks DuckDB for the top candidates in specific frontier windows.
+
+---
+
+# Bad Trades and Search-Space Pruning
+
+Before final prediction-guided selection, MagicQuant trims candidate choices that are unlikely to be worth exploring.
+
+This pruning is one reason the later smart fallback exists. The main prediction space is intentionally kept clean enough to find the obvious nonlinear wins. If every subtle local inversion or tiny trade were allowed to flood DuckDB, the ranking space could become muddy and the best cheese could be harder to see. The fallback is the pressure valve: after the main space fails, MagicQuant can still inspect isolated truth directly and try a few conservative free-lunch candidates without polluting the primary search.
+
+One major pruning concept is the **bad trade**.
+
+A bad trade is a candidate that buys only a tiny size reduction while paying disproportionate KLD or PPL damage.
+
+Suppose there is an accepted anchor `a` and a smaller candidate `r`.
+
+MagicQuant first checks:
+
+```text
+r.size < a.size
+```
+
+Then computes size gain:
+
+```text
+sizeDeltaPercent = (a.size - r.size) / a.size × 100
+```
+
+If the size gain is too large, MagicQuant does not classify it as a bad trade, because it may represent a real size tier.
+
+If the size gain is small enough, MagicQuant compares damage ratios:
+
+```text
+kldRatio = r.kld / a.kld
+pplRatio = |r.pplDeltaPercent| / |a.pplDeltaPercent|
+```
+
+With default-style thresholds such as:
+
+```text
+max size delta percent = 4.0
+KLD multiplier         = 2.5
+PPL multiplier         = 3.5
+```
+
+A candidate can be removed if:
+
+```text
+small size gain
+and disproportionate KLD damage
+```
+
+or:
+
+```text
+small size gain
+and disproportionate PPL damage
+```
+
+There is an important escape hatch: if the candidate is meaningfully better in one metric while worse in the other, MagicQuant treats it as a mixed tradeoff rather than deleting it blindly.
+
+So the spirit is not:
+
+```text
+remove everything smaller that looks worse
 ```
 
 It is:
 
 ```text
-Did predicted KLD look good at the predicted size, and then did the real built model confirm that outcome?
+do not waste search space on tiny size wins that are obviously overpaying in damage
 ```
+
+## Why bad trades exist
+
+Bad trades are not about scientific purity.
+
+They are about physics, time, and usefulness.
+
+MagicQuant is not omniscient. It cannot afford to validate every sub-neighborhood of every tiny trade.
+
+Bad-trade pruning lowers the probability of wasting validation budget on candidates that are very unlikely to earn a final slot.
+
+This is part of the bigger philosophy:
+
+```text
+practical frontier discovery > exhaustive worship of every possible combination
+```
+
+## Equivalent-truth pruning
+
+MagicQuant can also collapse candidates that are effectively indistinguishable in measured output space.
+
+If two choices produce equivalent measured truth, the safer or cleaner representative can survive while redundant variants are removed.
+
+Again, this is not hiding information.
+
+It is preventing meaningless clutter from polluting the final frontier.
 
 ---
 
-# 11. Prediction Is Not Validation
+# Candidate Selection: How a Hybrid Earns a Real Benchmark
 
-This is one of the most important parts of the system.
+After prediction materialization, MagicQuant does not simply build the top N candidates globally.
 
-MagicQuant does not publish predictions.
+It asks frontier-aware questions.
 
-MagicQuant publishes benchmark-validated survivors.
+The final chooser starts from current real anchors, then uses predicted rows to find candidates worth validating.
 
-A prediction can be impressive, elegant, and almost correct — and still be rejected.
-
-The final question is not:
+The major phases are:
 
 ```text
-Was the predicted KLD within X error?
+1. Strict dominance replacement
+2. Near-baseline replacement
+3. Interior subspace discovery
+4. Smart baseline-tuning fallback when a normal phase fails
+5. Best confirmed anomaly reconciliation
+6. Meaningful spacing
+7. Final dominance
 ```
 
-The final question is:
+## Phase 1: Strict dominance replacement
+
+A predicted candidate is considered for strict dominance when it appears able to beat an existing anchor at the same or smaller size.
+
+Prediction-space query:
 
 ```text
-Did the candidate achieve the outcome it was selected for?
+PredictedSizeBytes <= anchor.PredictedSizeBytes
+PredictedKld       <  anchor.PredictedKld
 ```
 
-That is a much better test.
+Then MagicQuant builds and benchmarks the candidate.
 
-## 11.1 Strict Dominance Replacement
-
-A candidate selected for strict dominance is trying to replace an existing anchor.
-
-It must prove:
+Real validation requires:
 
 ```text
-actual_size(candidate) ≤ actual_size(anchor)
-actual_KLD(candidate)  < actual_KLD(anchor)
+actualSize <= anchor.actualSize
+actualKld  < anchor.actualKld - epsilon
 ```
 
-With the configured epsilon applied to avoid meaningless equality games.
+If it passes, it can replace the anchor.
 
-If it fails, it is rejected.
+This is the cleanest kind of win.
 
-Even if the prediction was close.
+## Phase 2: Near-baseline replacement
 
-## 11.2 Near-Baseline Replacement
+Sometimes a hybrid is slightly larger than a smaller anchor but improves KLD enough to justify the tiny size premium.
 
-A near-baseline candidate is allowed to sit within a small size growth window near an existing anchor.
+This phase allows a controlled size growth window.
 
-But it must beat the local linear KLD expectation between anchors.
+The candidate must still earn the extra bytes.
 
-It is not enough to be “kind of nearby.”
-
-It has to earn the slot.
-
-## 11.3 Interior Subspace Discovery
-
-Interior discovery looks between adjacent surviving anchors.
-
-Suppose there is a smaller/higher-damage anchor and a larger/lower-damage anchor.
-
-MagicQuant draws a local linear KLD line between them:
+This prevents MagicQuant from saying:
 
 ```text
-line_KLD(size)
+This is bigger and barely better, therefore publish it.
 ```
 
-A candidate inside that window must land below that line:
+Instead, the question is:
 
 ```text
-actual_KLD(candidate) < line_KLD(actual_size(candidate))
+Did the candidate improve enough for the size it added?
 ```
 
-That means it is not merely between the two models.
+## Phase 3: Interior subspace discovery
 
-It is better than the expected straight-line tradeoff.
-
-That is what makes it interesting.
-
-## 11.4 Final Dominance and Spacing
-
-Even after candidates validate, MagicQuant still performs final cleanup.
-
-A model can be removed if another model dominates it.
-
-A model can also be removed if it is too close to a neighbor and does not provide enough unique value.
-
-This avoids flooding users with barely different models that only look important on paper.
-
----
-
-# 12. Reading a Failed Prediction
-
-Consider this failed strict dominance example:
-
-```json
-{
-  "reason": "StrictDominanceReplacement",
-  "predicted": {
-    "sizeGiB": "2.41",
-    "kld": 0.021967,
-    "lineKldAtPredictedSize": 0.022351,
-    "gainOverLine": 0.000384
-  },
-  "actual": {
-    "sizeGiB": "2.41",
-    "kld": 0.022565,
-    "lineKldAtActualSize": 0.022351,
-    "gainOverLine": -0.000214,
-    "sizeMissBytes": 0,
-    "kldMiss": 0.000214
-  },
-  "accepted": false
-}
-```
-
-The prediction said:
-
-```text
-This hybrid should be smaller than or equal to the anchor
-and lower KLD than the anchor.
-```
-
-The actual benchmark said:
-
-```text
-Size was fine.
-KLD was not.
-```
-
-The candidate missed by:
-
-```text
-0.000214 KLD
-```
-
-That is not catastrophic. It is not a sign that the predictor is useless.
-
-But it failed the reason it was selected.
-
-So MagicQuant rejected it.
-
-That is the system working correctly.
-
-Now consider the interior example:
-
-```json
-{
-  "reason": "InteriorSubspaceDiscovery",
-  "predicted": {
-    "sizeGiB": "3.78",
-    "kld": 0.001210,
-    "lineKldAtPredictedSize": 0.001608,
-    "gainOverLine": 0.000398
-  },
-  "actual": {
-    "sizeGiB": "3.78",
-    "kld": 0.001884,
-    "lineKldAtActualSize": 0.001608,
-    "gainOverLine": -0.000276
-  },
-  "accepted": false
-}
-```
-
-The prediction said:
-
-```text
-This should beat the local line between Q6_K_XL and Q8_0.
-```
-
-The actual benchmark said:
-
-```text
-It did not beat the line.
-```
-
-So it was rejected.
-
-Again: not because the prediction was “bad” in a simplistic numeric sense, but because the candidate failed the outcome contract.
-
-That is the correct validation philosophy.
-
----
-
-# 13. Practical Accuracy vs Perfect Accuracy
-
-MagicQuant’s prediction system should be described as **practically accurate**, not perfect.
-
-That wording is important.
-
-Perfect accuracy would mean the engine correctly predicts every local ordering, every nonlinear inversion, every microscopic KLD difference, and every sub-4-bit oddity.
-
-That is not the claim.
-
-Practical accuracy means:
-
-```text
-The prediction engine is accurate enough to identify the candidates worth physically validating,
-and wrong predictions are filtered by real benchmark outcome checks before publication.
-```
-
-That is a stronger engineering claim.
-
-It is not mystical.
-
-It is not pretending to know more than it knows.
-
-It is a very fast, empirically grounded way to avoid wasting benchmark time on combinations that almost certainly will not matter.
-
----
-
-# 14. The Q6_K vs Q8_0 Attn Output Example
-
-The `attn_output` behavior in Qwen3 4B 2507 Instruct is a perfect example of why MagicQuant is honest about its limits.
-
-In isolation, Q8_0 measurably beat Q6_K for `attn_output`.
-
-So the additive backbone learned:
-
-```text
-attn_output: Q8_0 is safer than Q6_K
-```
-
-That is the correct isolated conclusion.
-
-But when tested inside full combinations, nonlinear behavior appeared.
-
-Out of roughly 350 combinations where `attn_output` could have used Q6_K versus Q8_0:
-
-```text
-~65 combinations had Q6_K meaningfully beat Q8_0
-~32 combinations had Q8_0 meaningfully beat Q6_K
-the rest were Q8_0 wins or likely Q8_0 wins, but inside noise / not meaningfully separable
-```
-
-This is fascinating.
-
-It proves that nonlinear combination effects exist.
-
-It also proves why the prediction engine should not be described as omniscient.
-
-The additive backbone is blind to some context-specific inversions because isolated samples cannot encode every surrounding combination. If Q8_0 wins in isolation, the backbone generally ranks Q8_0 above Q6_K for that group.
-
-That creates a blind spot.
-
-But here is the critical point:
-
-> In measured pipeline behavior so far, this blind spot rarely changes the final survivor set in a way that justifies exploding the combinatoric search.
-
-That is the practical win.
-
-The prediction engine does not need to correctly worship every tiny local inversion.
-
-It needs to find meaningful final models.
-
-If the inversion is large enough to matter, sampling and fallback validation may surface nearby candidates. If it is too small, too noisy, or too local to affect the final frontier, MagicQuant should not waste massive compute chasing it.
-
-This is the exact meaning of practical accuracy.
-
----
-
-# 15. Why the Prediction Engine Can Be Wrong and Still Be Excellent
-
-A prediction engine can fail in two broad ways:
-
-```text
-false positive:
-    predicts a candidate is worth building,
-    but real validation rejects it
-
-false negative:
-    fails to prioritize a candidate that might have been good
-```
-
-MagicQuant is designed to make false positives cheap and false negatives tolerable.
-
-## 15.1 False Positives Are Contained
-
-If MagicQuant predicts a candidate should beat an anchor or line, the candidate is built and benchmarked.
-
-If it fails, it is discarded.
-
-The cost is a build/benchmark attempt.
-
-The final output remains clean.
-
-This is why the pipeline can afford to be aggressive.
-
-## 15.2 False Negatives Are Controlled by Practicality
-
-False negatives are more subtle.
-
-A perfect exhaustive search might find some combinations the predictor did not prioritize.
-
-But if those combinations only differ by noise-level KLD, or do not change final ranking, or create redundant files, they do not matter much.
-
-MagicQuant is not trying to prove no better microscopic combination exists.
-
-It is trying to publish a meaningful set of models.
-
-That is a different goal.
-
-And it is the right goal for real users.
-
----
-
-# 16. Noise-Level Differences
-
-A huge part of MagicQuant’s philosophy is knowing when not to care.
-
-Two candidates may differ by:
-
-```text
-0.000001 KLD
-0.000005 KLD
-0.000010 KLD
-```
-
-Depending on benchmark stability, corpus size, hardware behavior, and measurement conditions, that may not be meaningful.
-
-This is why MagicQuant should avoid language like:
-
-```text
-Candidate A is absolutely superior to Candidate B because it is 0.000002 KLD lower.
-```
-
-Instead, the better language is:
-
-```text
-These candidates are within noise or near-noise range, so MagicQuant does not treat the difference as a meaningful survivor distinction.
-```
-
-This is also why the Rank-Safe Projection’s plateaus are valuable.
-
-When the system lacks trustworthy ordering resolution, it can collapse candidates into tied regions instead of pretending tiny differences are destiny.
-
----
-
-# 17. Sub-4-Bit Behavior
-
-Sub-4-bit quantization is where the monsters start peeking out from the basement.
-
-At very low bit depths, several things become more likely:
-
-1. isolated measurements may become less transferable,
-    
-2. group interactions may become stronger,
-    
-3. KLD behavior may become less linear,
-    
-4. PPL and KLD may disagree more often,
-    
-5. quantization format quirks may matter more,
-    
-6. benchmark noise may become more visible,
-    
-7. tiny tensor-distribution differences may create surprising local wins.
-    
-
-MagicQuant handles this by combining:
-
-```text
-isolated physical measurements
-bit-stress interaction correction
-rank-safe projection
-real benchmark validation
-fallback attempts
-final dominance filtering
-meaningful spacing
-```
-
-So the system is not pretending sub-4-bit is clean.
-
-It is building guardrails around the chaos.
-
----
-
-# 18. The Local Linear KLD Line
-
-One of the best concepts in MagicQuant is the local linear line.
+This is where the local linear KLD line matters.
 
 Suppose there are two validated anchors:
 
@@ -1252,190 +1285,1130 @@ Suppose there are two validated anchors:
 smaller anchor:
     size = S_small
     KLD  = K_small
-    damage is higher
+    higher damage
 
 larger anchor:
     size = S_large
     KLD  = K_large
-    damage is lower
+    lower damage
 ```
 
-For any candidate size between them, MagicQuant computes the expected straight-line KLD:
+For a candidate between them:
+
+```text
+S_small <= S_candidate <= S_large
+```
+
+MagicQuant computes the straight-line expected KLD:
 
 ```text
 t = (S_candidate - S_small) / (S_large - S_small)
 
-line_KLD =
-    K_small + t × (K_large - K_small)
+lineKld = K_small + t × (K_large - K_small)
 ```
 
-The candidate must beat that line:
+The candidate must beat the line:
 
 ```text
-actual_KLD(candidate) < line_KLD
+candidateKld < lineKld
 ```
 
-This is brilliant because it avoids rewarding a candidate merely for existing between two known models.
+Why?
 
-A candidate between Q6_K and Q8_0 should not survive just because it is between them.
+Because any random candidate can land between two anchors. That does not make it useful.
 
-It should survive because it is better than the boring interpolation.
+A hybrid earns an interior slot only when it is better than the boring interpolation between known choices.
 
-That is how MagicQuant finds nonlinear trade spaces worth showing.
+That is how MagicQuant finds nonlinear trade spaces instead of merely generating extra files.
+
+## Fallback attempts
+
+MagicQuant has two different fallback ideas, and they should not be confused.
+
+The first is the normal prediction-guided fallback. If the best DuckDB-selected candidate fails real validation, MagicQuant may try a limited number of additional predicted candidates from that same phase window. These are still normal prediction-space candidates. They were selected from the materialized DuckDB ranking.
+
+The second is the smart baseline-tuning fallback. This runs only after the normal prediction-guided path fails to validate a candidate for the strict, near-baseline, or interior window. It is not a broader DuckDB query. It is a conservative SQLite/isolation-truth routine that starts from the anchor's uniform baseline blanket and asks whether isolated measurements reveal a cheap group swap worth trying.
+
+This matters because the prediction engine is intentionally practical, not omniscient.
+
+A false positive is acceptable if it is cheap and filtered by validation.
+
+A fallback can still discover the real winner nearby, but the fallback must obey the same real benchmark contract as the phase that invoked it.
+
+## Stop after success
+
+For normal strict-dominance behavior, once a candidate validates successfully for an anchor, MagicQuant does not need to keep validating every other top candidate for that same anchor.
+
+The system is trying to discover the frontier, not benchmark a trophy parade.
+
+There can be a special anomaly-oriented mode that validates more candidates for analysis, but the default practical discovery behavior is:
+
+```text
+validate until success
+accept success
+move on
+```
+
+## Meaningful spacing
+
+After candidate acceptance, MagicQuant applies meaningful spacing.
+
+If two survivors are too close in size, the weaker one can be collapsed away.
+
+The minimum neighbor gap is based on a fraction of the global survivor size span:
+
+```text
+minGap = globalSizeSpan × minimumNeighborGapFraction
+```
+
+If two candidates are closer than `minGap`, MagicQuant chooses the spacing winner by:
+
+```text
+strict dominance if possible
+otherwise lower KLD
+otherwise smaller size
+```
+
+This prevents the final release from showing a dozen nearly identical files that do not meaningfully help users choose.
+
+## Final dominance
+
+Finally, MagicQuant runs real dominance again.
+
+If any survivor is no longer justified because another survivor is no larger and has lower real KLD, it is removed.
+
+The final list is therefore not “all interesting things MagicQuant found.”
+
+It is the cleaned, validated, useful frontier.
+
 
 ---
 
-# 19. What Makes a Hybrid “Earn Its Place”
+# Smart Baseline-Tuning Fallback: Conservative Free-Lunch Search
 
-A MagicQuant hybrid earns its place when it does at least one of the following:
+The smart baseline-tuning fallback exists because the main prediction space is deliberately disciplined.
 
-## 19.1 Strict Dominance
+DuckDB prediction is excellent at finding strong nonlinear candidates, but that strength comes from keeping the searchable space clean. Bad-trade pruning and deterministic filters prevent noisy, subtle, or locally suspicious choices from flooding the ranking table. That is usually the right tradeoff.
 
-It is no larger than an existing anchor and has lower real KLD.
+But it creates a blind spot.
 
-```text
-same or smaller size
-lower damage
-```
-
-That is a clean win.
-
-## 19.2 Near-Baseline Replacement
-
-It is slightly larger than a smaller anchor but improves KLD enough to justify the size premium.
+Some real wins are not giant prediction-space discoveries. Some are tiny MDA-backed improvements:
 
 ```text
-small size increase
-meaningful KLD improvement
+a group is isolated-tested against the blanket baseline
+it is same-size-or-smaller
+it has lower isolated KLD
+there is no fancy combo theory needed
 ```
 
-## 19.3 Interior Discovery
+That kind of result can be too subtle for the main prediction space, especially if allowing every such tiny path into DuckDB would muddy the ranking universe.
 
-It lands between two anchors and beats the local linear tradeoff line.
+So MagicQuant separates the jobs:
 
 ```text
-better than expected for its size
+DuckDB prediction path:
+    find the high-confidence frontier cheese
+
+Smart fallback path:
+    after prediction fails, try a few conservative isolation-backed freebies
 ```
 
-## 19.4 Meaningful Gap Filling
+This is not a second brute-force engine.
 
-It occupies a useful region of the size/fidelity frontier that would otherwise have a large jump.
+It is a last-resort, low-count, benchmark-validated candidate generator.
+
+## When the smart fallback runs
+
+The fallback is gated by configuration:
+
+```yaml
+candidate_selection:
+  smart_fallback_enabled: true
+  smart_fallback_attempts_per_failure: 3
+  smart_fallback_max_higher_fidelity_steps: 2
+```
+
+It runs only after the normal phase fails.
+
+For strict dominance, it can run per anchor when:
 
 ```text
-not redundant
-not fake precision
-actually useful to users
+no predicted virtual anchor exists
+or no physically eligible predicted candidates remain
+or the normal predicted candidates fail real validation
 ```
 
-## 19.5 Final Survival
-
-It survives dominance filtering and spacing cleanup.
+For near-baseline replacement, it can run per adjacent anchor pair when:
 
 ```text
-not eliminated by a better neighbor
-not collapsed as meaningless clutter
+predicted anchors are missing
+or no predicted candidate survives deterministic filters
+or normal predicted candidates fail real validation
 ```
 
-That is what “earned its place” means.
+For interior subspace discovery, it can run after the normal interior phase finds no accepted candidate.
 
-Not “MagicQuant made a hybrid.”
+The fallback does not replace the main prediction path. It waits behind it.
 
-Not “the prediction said it looked cool.”
+## What truth the fallback uses
 
-Earned.
+The smart fallback does not query materialized DuckDB prediction rows.
+
+Its candidate notes are explicitly shaped as:
+
+```text
+smartFallback=sqlite-isolation-truth; not selected from DuckDB prediction rows
+```
+
+Instead, it loads the local benchmark truth needed to reason from isolation samples:
+
+```text
+active tensor groups
+pure baseline snapshots
+Q8_0 pure benchmark
+Q8_0 native-exact base-only anchor
+base-only anchors for known baselines when available
+single-group isolation snapshots by group and baseline
+```
+
+The fallback therefore works from the same measured local physics as the normal predictor, but it uses that truth differently.
+
+The normal predictor says:
+
+```text
+rank the full candidate universe
+```
+
+The smart fallback says:
+
+```text
+start from this one failed anchor blanket
+look for a tiny number of local swaps that isolated truth says are better
+```
+
+## Baseline blanket resolution
+
+The fallback first resolves the failed anchor into a baseline blanket.
+
+It can use a pure baseline or a uniform learned/external baseline. For example:
+
+```text
+base        = UD-Q4_K_XL
+embeddings  = UD-Q4_K_XL
+lm_head     = UD-Q4_K_XL
+attn_q      = UD-Q4_K_XL
+attn_kv     = UD-Q4_K_XL
+attn_output = UD-Q4_K_XL
+ffn_up_gate = UD-Q4_K_XL
+ffn_down    = UD-Q4_K_XL
+```
+
+It skips anchors that are native/exact precision.
+
+It also skips anchors that are already non-uniform hybrids:
+
+```text
+anchor is already a mixed hybrid => no smart blanket fallback
+```
+
+That guard matters. The fallback is not trying to explain an already-complex hybrid. It is asking whether a uniform baseline has obvious isolated weak spots that can be tuned safely.
+
+## Building isolated group options
+
+For each active group, the fallback compares the blanket baseline's isolated sample against every allowed explicit group candidate.
+
+For a group `g`, blanket baseline `b`, and candidate baseline `q`:
+
+```text
+baseIsolation      = D(g, b)
+candidateIsolation = D(g, q)
+
+kldGain = baseIsolation.kld - candidateIsolation.kld
+```
+
+A group option is allowed only when:
+
+```text
+kldGain > minimumKldImprovementEpsilon
+```
+
+So the fallback does not try swaps merely because they are smaller.
+
+A lower-fidelity candidate can be used, but only if isolated truth says it is measurably better than the blanket group state.
+
+A higher-fidelity candidate can be used, but only up to the configured climb limit:
+
+```text
+smart_fallback_max_higher_fidelity_steps
+```
+
+This prevents the fallback from “winning” by simply walking everything upward to expensive high fidelity.
+
+For each accepted option, the fallback computes a group-level size delta:
+
+```text
+baseContributionBytes      = baseIsolation.size - q8ExactBlanket.size
+candidateContributionBytes = candidateIsolation.size - q8ExactBlanket.size
+sizeDeltaBytes             = candidateContributionBytes - baseContributionBytes
+```
+
+Then it scores the option using isolated KLD gain, damage avoided per MiB, and sensitivity.
+
+Same-size-or-smaller improvements receive a strong free-lunch bias, because they represent exactly the kind of subtle MDA win that should not require a giant prediction-space theory.
+
+## Plan strategies
+
+The fallback turns group options into a small set of candidate plans.
+
+The current strategy families are:
+
+```text
+free-lunch-same-or-smaller
+single-sensitive-group
+balanced-brain-protection
+sensitivity-first-blend
+```
+
+### free-lunch-same-or-smaller
+
+This plan chooses the best same-size-or-smaller KLD-improving option per group.
+
+It is the cleanest fallback pattern:
+
+```text
+spend no extra size
+reduce isolated KLD
+try the resulting blanket tweak
+```
+
+This is how a candidate can emerge from pure MDA logic rather than prediction-space cheese.
+
+### single-sensitive-group
+
+This plan tries one high-value group swap by itself.
+
+It exists because one tensor group may be disproportionately damaging in isolation. Sometimes the best practical candidate is not a broad hybrid; it is simply:
+
+```text
+protect this one weirdly sensitive thing
+leave the rest alone
+```
+
+### balanced-brain-protection
+
+This plan is used for premium and interior fallback windows.
+
+It starts with free lunches, then tries to spend available size budget on the most valuable positive-size protection options. It keeps the plan only if the predicted size stays inside the requested real size window.
+
+This is the “ehh... I wonder if...” mode.
+
+It does not claim certainty. It says:
+
+```text
+this protected set costs bytes,
+but isolated truth says those bytes protect disproportionate damage,
+and the phase window gives us room to try
+```
+
+### sensitivity-first-blend
+
+This plan blends the free-lunch set with one high-sensitivity positive-size option.
+
+It is another controlled gamble for premium and interior windows, especially when one group looks like it may deserve special protection.
+
+## Strict fallback behavior
+
+Strict smart fallback is the most conservative mode.
+
+For strict dominance, group options are filtered to same-size-or-smaller swaps:
+
+```text
+option.sizeDeltaBytes <= 0
+```
+
+The final plan must also predict no larger than the strict anchor size:
+
+```text
+predictedSize <= anchor.size
+```
+
+Real validation then uses the same strict dominance contract as the normal phase:
+
+```text
+actualSize <= anchor.actualSize
+actualKld  < anchor.actualKld - epsilon
+```
+
+If it passes, the fallback candidate can eliminate the anchor with a reason like:
+
+```text
+smart baseline-tuning strict dominance fallback:
+real benchmark validated lower KLD at same-or-smaller size
+```
+
+If it fails, it dies.
+
+No philosophical trophy. No special pleading. Reality bonks it with the newspaper.
+
+## Near-baseline and interior fallback behavior
+
+Near-baseline and interior smart fallbacks are allowed to gamble more than strict fallback, but only inside the phase's real size window.
+
+For these modes, positive-size group protection is allowed when it fits:
+
+```text
+realMinSize <= predictedSize <= realMaxSize
+```
+
+The fallback scores plans by:
+
+```text
+isolated group option strength
+additive KLD gain versus the blanket
+predicted gain over the local line
+how effectively the plan uses the available size budget
+```
+
+But score is only for ordering attempts.
+
+The real benchmark still decides.
+
+Near-baseline validation requires:
+
+```text
+actual size inside the near-baseline premium window
+actual KLD beats the real local linear KLD line
+```
+
+Interior validation requires:
+
+```text
+actual size inside the interior window
+actual KLD beats the real interior linear KLD line
+```
+
+That is why a fallback can discover a premium winner without pretending it knew the final nonlinear outcome in advance.
+
+It is allowed to say:
+
+```text
+This looks like a good isolated-damage trade.
+It fits the allowed size window.
+Let's spend one of the few fallback attempts and see if reality agrees.
+```
+
+## Attempt limits and confidence
+
+The smart fallback is intentionally small.
+
+By default, it gets:
+
+```text
+smart_fallback_attempts_per_failure = 3
+```
+
+Plans are converted into synthetic `HybridSelectionCandidate` rows with:
+
+```text
+PredictionConfidence = 0.50
+CandidateTheoryFamilyKey = smart-baseline-tuning
+DiversityMode = sqlite-isolation-fallback
+```
+
+That lower confidence is honest.
+
+The fallback is not saying:
+
+```text
+I predicted this whole global hybrid interaction perfectly.
+```
+
+It is saying:
+
+```text
+I found a locally measured trade that is cheap enough and plausible enough to validate.
+```
+
+## Why this does not muddy prediction space
+
+This design protects the main engine.
+
+If subtle local wins were all allowed into the primary DuckDB materialization path, MagicQuant could end up overvaluing tiny isolated inversions, weak bad-trade-adjacent movements, or noisy local improvements. That can bury the cleaner nonlinear candidates the main engine is excellent at finding.
+
+The smart fallback avoids that by running after failure, in a narrow anchor/window context, with very few attempts, and with the same real validation contracts.
+
+So the system gets both behaviors:
+
+```text
+aggressive prediction-space cheese when the signal is strong
+conservative MDA/free-lunch tuning when the strong signal fails
+```
+
+## Example: Qwen3.6-27B MQ-IQ4_NL
+
+A representative fallback result is a `UD-Q4_K_XL` blanket with a few isolated group swaps:
+
+```json
+{
+  "embeddings": "IQ4_NL",
+  "lm_head": "UD-Q4_K_XL",
+  "attn_q": "IQ4_XS",
+  "attn_kv": "Q5_K_S",
+  "attn_output": "UD-Q4_K_XL",
+  "ffn_up_gate": "UD-Q4_K_XL",
+  "ffn_down": "UD-Q4_K_XL"
+}
+```
+
+The important part is not that the full predictor discovered some grand combination.
+
+It did not.
+
+The fallback saw local truths:
+
+```text
+IQ4_NL on embeddings beat the Q4/UD-Q4 blanket in isolation at same-or-smaller size.
+IQ4_XS on attn_q was better and smaller than IQ4_NL in that group.
+The saved size gave enough room to protect attn_kv with Q5_K_S.
+```
+
+That is free lunch plus one budgeted protection move.
+
+No broad search-space pollution.
+
+No claim of omniscience.
+
+Just measured local physics turned into a small real benchmark attempt.
+
+## Example: Qwen3.6-27B MQ-IQ3_M_1
+
+Another fallback result used a `UD-Q3_K_XL` blanket:
+
+```json
+{
+  "embeddings": "IQ4_NL",
+  "lm_head": "UD-Q3_K_XL",
+  "attn_q": "UD-Q3_K_XL",
+  "attn_kv": "Q5_K_S",
+  "attn_output": "UD-Q3_K_XL",
+  "ffn_up_gate": "UD-Q3_K_XL",
+  "ffn_down": "UD-Q3_K_XL"
+}
+```
+
+This kind of candidate may not present as an obvious strict dominance candidate. It may instead be a premium or interior bet:
+
+```text
+can we protect the most damaging group enough,
+stay inside the allowed size budget,
+and beat the real nonlinear trade line?
+```
+
+The fallback does not know with high confidence that the answer is yes.
+
+It knows the isolated trade is plausible enough to spend one of the few guarded attempts.
+
+That is the whole point.
+
+## The fallback contract
+
+The smart fallback may suggest candidates.
+
+It does not publish candidates.
+
+A fallback candidate survives only if the real benchmark satisfies the same phase contract that any normal predicted candidate must satisfy.
+
+The fallback is therefore best understood as:
+
+```text
+small empirical bet generator
+```
+
+not:
+
+```text
+second final judge
+```
+
+The final judge is still real benchmark truth.
 
 ---
 
-# 20. Why Baselines Can Beat Hybrids
+# Anomaly Detection: Respecting Violations of Gravity
 
-MagicQuant is not biased toward hybrids.
+Normal prediction is gravity-respecting.
 
-Sometimes the best answer is a normal baseline quant.
+But some architectures produce meaningful violations.
 
-That is fine.
+An anomaly is not just:
 
-In fact, that is part of the trust model.
+```text
+lower-bit quant looked slightly better somewhere
+```
 
-If a pure Q6_K, Q5_K, Q4_K_M, Unsloth, llama.cpp, or other baseline artifact wins under equal evaluation conditions, MagicQuant should say so.
+An anomaly is a validated contextual pattern where a candidate violates the expected monotonic direction enough to matter.
 
-The goal is not to prove MagicQuant hybrids are always superior.
+The current system is designed to detect, probe, classify, and learn these violations without destroying the normal gravity prior.
 
-The goal is to provide a final downloadable set that is honest.
+## Why anomaly detection uses Q8 context
 
-Sometimes the baseline already occupies the best tradeoff.
+Normal isolation uses:
 
-Sometimes a hybrid earns a new slot.
+```text
+base Q8 carrier
+all active groups native exact
+one group changed
+```
 
-Sometimes a hybrid almost earns a slot but fails real validation.
+That is excellent for local marginal truth.
 
-All three outcomes are useful.
+But some emergent behavior only appears when the surrounding context is also quantized.
+
+If everything else is BF16/native exact, certain Q8-vs-Q6 effects can be hidden or dampened. In fully quantized space, the interaction can surface.
+
+So anomaly detection uses a different kind of reference:
+
+```text
+explicit quantized context twin
+```
+
+For a Q8 anomaly probe, the reference twin can be:
+
+```text
+base        = Q8_0
+embeddings  = Q8_0
+lm_head     = Q8_0
+attn_q      = Q8_0
+attn_kv     = Q8_0
+attn_output = Q8_0
+ffn_up_gate = Q8_0
+ffn_down    = Q8_0
+```
+
+Then a monotone-downgrade candidate might be:
+
+```text
+base        = Q8_0
+embeddings  = Q8_0
+lm_head     = Q8_0
+attn_q      = Q8_0
+attn_kv     = Q8_0
+attn_output = Q8_0
+ffn_up_gate = Q8_0
+ffn_down    = Q6_K
+```
+
+This is not a BF16 isolation sample.
+
+It is a contextual twin comparison inside quantized space.
+
+That distinction is critical.
+
+Normal isolation asks:
+
+```text
+What does this group look like against native-exact surroundings?
+```
+
+Anomaly probing asks:
+
+```text
+What happens if this lower-bit move is made inside the quantized neighborhood where the final hybrid actually lives?
+```
+
+## Movement classification
+
+MagicQuant compares a candidate to its reference twin and classifies the movement.
+
+Common movement classes include:
+
+```text
+NoMovement
+MonotoneDowngrade
+MonotoneUpgrade
+MixedTrade
+LateralOrProviderEquivalent
+Unknown
+```
+
+The anomaly smoke system cares heavily about monotone downgrades:
+
+```text
+candidate is same or lower fidelity than twin
+candidate has no compensating upgrades
+candidate may save size
+candidate may unexpectedly improve KLD
+```
+
+A monotone downgrade that wins is the interesting case because it violates gravity.
+
+## Smoke detection
+
+Anomaly smoke can come from two places:
+
+```text
+1. Historical real benchmark rows
+2. DuckDB prediction-space rows
+```
+
+Historical smoke asks:
+
+```text
+Have we already benchmarked a candidate and its contextual twin?
+Did the lower-bit candidate actually beat the higher-bit twin?
+```
+
+Prediction-space smoke asks:
+
+```text
+Does the predicted search space contain a monotone downgrade that appears suspicious enough to probe?
+```
+
+A smoke candidate is not yet a rule.
+
+It is a hypothesis.
+
+## Smoke filters
+
+MagicQuant avoids probing every possible anomaly-looking row.
+
+A smoke candidate must satisfy conditions such as:
+
+```text
+valid contextual quantized config
+monotone downgrade movement
+changed group count under configured max
+predicted size savings over twin
+prediction-space gap not catastrophically bad
+not duplicate of existing rule/suppression
+```
+
+The goal is to spend a tiny number of probes on high-signal suspects.
+
+## Probe planning
+
+For each smoke seed, MagicQuant builds contextual probes.
+
+If the candidate changed several groups, MagicQuant can test subsets:
+
+```text
+single-group probes
+pair probes
+full probe
+composition probes
+```
+
+Example:
+
+```text
+reference twin:
+    all active groups Q8_0
+
+candidate changes:
+    attn_q      Q8_0 -> Q6_K
+    ffn_down    Q8_0 -> Q6_K
+    ffn_up_gate Q8_0 -> Q5_K
+```
+
+MagicQuant can probe:
+
+```text
+attn_q only
+ffn_down only
+ffn_up_gate only
+attn_q + ffn_down
+attn_q + ffn_up_gate
+ffn_down + ffn_up_gate
+all three
+```
+
+But it does this within strict budgets.
+
+The point is not to validate every possible truth.
+
+The point is to find enough evidence to guide frontier discovery.
+
+## Probe validation
+
+Each probe is physically built and benchmarked against its contextual twin.
+
+Let:
+
+```text
+K_ref   = real KLD of higher-bit twin
+K_probe = real KLD of lower-bit probe
+```
+
+The actual gain is:
+
+```text
+gain = K_ref - K_probe
+```
+
+A beneficial anomaly requires:
+
+```text
+probe.size <= reference.size
+gain >= minimum actual gain threshold
+```
+
+If true, the lower-bit candidate is smaller and better.
+
+That is a real violation.
+
+If the probe is meaningfully worse than the twin, MagicQuant can store harmful evidence.
+
+If neither side is strong enough, the result is treated as normal gravity or suppression-only evidence.
+
+## Probe classifications
+
+A validated beneficial probe can become:
+
+```text
+SingleGroupInversion
+PairSynergy
+HigherOrderSynergy
+CounterfactualMdaViolation
+```
+
+A harmful probe can become:
+
+```text
+HarmfulInteraction
+HarmfulInterference
+ContaminatingPassenger
+```
+
+A failed anomaly becomes:
+
+```text
+NormalGravity
+SuppressionOnly
+```
+
+That is important: a failed anomaly is still useful.
+
+It tells MagicQuant:
+
+```text
+The smoke was not real enough. Trust gravity here.
+```
 
 ---
 
-# 21. How the Prediction Engine Scales
+# How Anomaly Rules Adjust Prediction Space
 
-The prediction engine scales because the expensive part is not proportional to the full combinatoric space.
+Once probes are validated, MagicQuant can persist scoped anomaly rules.
 
-If there are:
-
-```text
-G tensor groups
-Q possible quant choices per group
-```
-
-A naive full search looks like:
+A rule is scoped to the current truth bucket:
 
 ```text
-Q^G
-```
-
-That gets disgusting fast.
-
-MagicQuant instead builds an isolation library closer to:
-
-```text
-G × Q
-```
-
-Then predicts large portions of the hybrid space using:
-
-```text
-additive damage
-pairwise bit-stress correction
-rank-safe projection
-```
-
-The result is not free.
-
-But it is wildly more tractable.
-
-This is why the new system can sample and build many times faster than the old approach. The prediction engine converts the search from “try everything” into “measure the local physics, infer the frontier, validate the likely winners.”
-
-That is the whole game.
-
----
-
-# 22. Repeatable Algorithm
-
-This section describes the full repeatable process.
-
-## Step 1: Scope the Prediction Bucket
-
-Predictions are scoped by:
-
-```text
-model
 architecture family
+tensor group profile
+model hash
 imatrix identity
 benchmark category
-active tensor groups
 ```
 
-Do not mix unrelated contexts unless intentionally building a cross-model research layer.
+It is not a universal law.
 
-## Step 2: Build Pure Baselines
+A rule says something closer to:
 
-Build and benchmark pure baselines such as:
+```text
+In this model/profile/imatrix context,
+this group movement showed a confirmed counterfactual effect.
+```
+
+## Actual KLD does not directly replace prediction KLD
+
+This is subtle.
+
+Even when a real probe confirms a beneficial anomaly, MagicQuant does not simply subtract the real KLD gain from every matching prediction row.
+
+Prediction KLD is rank-relative.
+
+So anomaly adjustment is sized around how much the candidate must move in prediction space to be ordered correctly relative to its twin.
+
+Let:
+
+```text
+baseGap = candidatePredictedKld - twinPredictedKld
+margin  = prediction-space violation margin
+```
+
+For a beneficial anomaly, the required ordering movement is:
+
+```text
+required = -(max(0, baseGap) + margin)
+```
+
+For a harmful anomaly:
+
+```text
+required = max(margin, abs(baseGap) + margin)
+```
+
+Then MagicQuant applies confidence, shrink factors, context multipliers, and caps.
+
+The actual probe result affects:
+
+```text
+classification
+confidence
+rule acceptance
+metadata
+```
+
+But prediction-space movement remains prediction-space movement.
+
+This avoids mixing coordinate systems incorrectly.
+
+## Beneficial rules are pairwise, not universal blessings
+
+Beneficial anomaly adjustment is intentionally conservative.
+
+A beneficial rule is applied as **pairwise twin ordering**.
+
+That means:
+
+1. Find rows matching the candidate side of the rule.
+2. Find their higher-fidelity twins in the same context.
+3. Move the candidate below the twin by a small margin if needed.
+
+Formula shape:
+
+```text
+newFinalKld = max(0, min(candidateCurrentFinalKld, twinEffectiveKld - margin))
+```
+
+Then:
+
+```text
+AnomalyAdjustmentKld = newFinalKld - BaseRankSafeKld
+```
+
+This is not saying:
+
+```text
+Q6_K is now universally better than Q8_0.
+```
+
+It is saying:
+
+```text
+Where this contextual twin relationship exists,
+order the confirmed lower-bit anomaly beneath its higher-bit twin.
+```
+
+If the twin row is missing, MagicQuant does not apply a broad fallback boost.
+
+That restraint matters.
+
+## Harmful rules can demote more broadly
+
+Harmful rules are safer to apply broadly because they are cautionary.
+
+If a pattern was shown to be harmful, MagicQuant can increase predicted KLD for matching rows, subject to caps.
+
+Shape:
+
+```text
+FinalPredictedKld = BaseRankSafeKld + bounded harmful adjustment
+```
+
+This helps avoid spending validation budget on patterns already shown to be contaminating.
+
+## Suppression-only rules
+
+Suppression-only evidence does not mutate prediction scores.
+
+It records:
+
+```text
+we tested this smoke
+it did not confirm a useful anomaly
+normal gravity applies
+```
+
+That prevents repeated waste without pretending a new numeric law was learned.
+
+## No global PAVA after anomaly exceptions
+
+This is also important.
+
+Normal gravity prediction is PAVA-projected into a rank-safe monotonic sequence.
+
+Anomaly adjustment is then applied as scoped exception evidence.
+
+MagicQuant does not rerun global PAVA after anomaly adjustments, because doing so would smear local exceptions back into the global gravity field.
+
+The final prediction columns therefore mean:
+
+```text
+BaseRankSafeKld:
+    normal gravity-respecting PAVA prediction
+
+AnomalyAdjustmentKld:
+    scoped exception adjustment
+
+FinalPredictedKld:
+    prediction used after anomaly adjustment
+```
+
+That separation keeps the system honest.
+
+---
+
+# The Qwen3.6-27B Q8 vs Q6 Example
+
+The Qwen3.6-27B run is the cleanest example of why the new system matters.
+
+The normal isolation evidence said gravity was still real.
+
+For `ffn_down`, the isolated measurements showed Q8 better than Q6:
+
+```text
+ffn_down = Q8_0:
+    isolated KLD ≈ 0.000680
+
+ffn_down = Q6_K:
+    isolated KLD ≈ 0.001247
+```
+
+In other words, normal isolation said:
+
+```text
+Q8_0 is safer than Q6_K for ffn_down.
+```
+
+That is exactly what gravity predicts.
+
+But the full quantized context exposed a stronger pattern.
+
+A candidate emerged:
+
+```text
+base        = Q8_0
+embeddings  = Q8_0
+lm_head     = Q8_0
+attn_q      = Q8_0
+attn_kv     = Q8_0
+attn_output = Q8_0
+ffn_up_gate = Q8_0
+ffn_down    = Q6_K
+```
+
+This candidate became:
+
+```text
+MQ-Q6_K_1
+```
+
+It validated at approximately:
+
+```text
+size = 27.25 GB
+KLD  = 0.002845
+```
+
+The pure llama.cpp Q8_0 anchor was approximately:
+
+```text
+size = 28.60 GB
+KLD  = 0.003768
+```
+
+So the hybrid was:
+
+```text
+smaller than Q8_0
+lower KLD than Q8_0
+```
+
+That is strict dominance.
+
+This is not a normal tiny inversion.
+
+This is a meaningful violation of the usual gravity expectation.
+
+## What the example does not mean
+
+It does not mean:
+
+```text
+Q6_K is universally better than Q8_0.
+```
+
+It does not mean:
+
+```text
+MDA is false.
+```
+
+It does not mean:
+
+```text
+Q8 is source of truth.
+```
+
+It means:
+
+```text
+In this architecture/context, lowering ffn_down from Q8_0 to Q6_K produced a validated beneficial anomaly.
+```
+
+The correct lesson is not to abandon gravity.
+
+The correct lesson is:
+
+```text
+Gravity is the default.
+Real validated anomaly patterns are exceptions.
+Those exceptions should be learned, scoped, and exploited.
+```
+
+That is what the modern engine does.
+
+---
+
+# Repeatable Algorithm
+
+This section describes the process as if rebuilding the system from scratch.
+
+## Step 1: Define the prediction bucket
+
+Scope all truth to:
+
+```text
+model hash
+architecture family
+tensor group profile
+imatrix identity
+benchmark category
+```
+
+Do not mix unrelated truth unless intentionally designing cross-model research.
+
+## Step 2: Define active tensor groups
+
+Start from known tensor group definitions.
+
+Remove groups unused by the current architecture.
+
+Example active group set:
+
+```text
+embeddings
+attn_q
+attn_kv
+attn_output
+ffn_up_gate
+ffn_down
+```
+
+## Step 3: Build pure baselines
+
+Benchmark pure baselines and external baselines:
 
 ```text
 Q8_0
@@ -1443,56 +2416,435 @@ Q6_K
 Q5_K
 Q4_K_M
 IQ4_XS
-external/custom baselines where applicable
+Unsloth Dynamic variants
+other configured custom baselines
 ```
 
-These become anchor points for final comparison.
+These become real anchors.
 
-## Step 3: Build Exact-Blanket Anchors
+## Step 4: Build the Q8 exact-blanket base-only anchor
 
-Build exact-blanket carrier states where active tensor groups are held at native/exact precision under a carrier.
-
-The key anchor is the Q8 exact blanket.
-
-This provides the size and KLD reference environment for isolated group probes.
-
-## Step 4: Build Single-Group Isolations
-
-For each active tensor group and each relevant quantization target:
+Create:
 
 ```text
-start from Q8 carrier exact blanket
-force exactly one group to target quant
-leave all other groups exact
-benchmark KLD/PPL/size
-store result
+base = Q8_0
+all active groups = native exact
 ```
 
-This creates:
+Benchmark it.
+
+This is the exact-blanket reference for normal isolation.
+
+## Step 5: Build single-group isolation samples
+
+For every active group `g` and target quant `q`:
+
+```text
+base = Q8_0
+all active groups = native exact
+only group g = q
+```
+
+Benchmark and store:
 
 ```text
 D(g, q)
+S_iso(g, q)
+PPL(g, q)
 ```
 
-The isolation damage library.
+Do not treat Q8 as zero damage. Q8 has measured isolated truth.
 
-## Step 5: Generate Candidate Configurations
+## Step 6: Generate candidate space
 
-Generate candidate hybrid configurations from the allowed quant choices.
+Generate candidate tensor configurations from allowed base quants and group choices.
 
-Discard configurations that are impossible, unsupported, missing required mappings, or outside search policy.
+Apply runtime bans, unsupported combinations, unused groups, and search-space policy.
 
-## Step 6: Compute Effective Baselines
+## Step 7: Prune bad trades
 
-For each candidate and group:
+Within each group, remove candidates that offer tiny size savings but disproportionate damage.
+
+Keep mixed tradeoffs where a candidate meaningfully improves one metric while worsening another.
+
+## Step 8: Compute effective quantization
+
+For every candidate and active group:
 
 ```text
-effective = override if present else base quant
+e_g(c) = override_g(c) if override exists
+       = base(c) otherwise
 ```
 
-Normalize external baselines to their built-in standard baseline when needed for isolation lookup.
+Normalize external baseline IDs for isolation lookup when safe.
 
-## Step 7: Predict Additive Damage
+## Step 9: Compute additive KLD
+
+```text
+A(c) = Σ D(g, e_g(c))
+```
+
+If required isolation data is missing, mark candidate not safely predictable.
+
+## Step 10: Compute predicted size
+
+```text
+Ŝ(c) = S_base(base(c)) + Σ [S_iso(g, e_g(c)) - S_q8_exact]
+```
+
+If size anchors are missing, mark candidate unsafe for size selection.
+
+## Step 11: Fit interaction correction
+
+Use existing real benchmark rows in the current bucket.
+
+For thresholds `B`, compute:
+
+```text
+X_B(c) = Σ D_iD_jstress_i stress_j
+```
+
+Fit:
+
+```text
+Y(c) = αA(c) + βX_B(c)
+```
+
+Choose the threshold with lowest MAE.
+
+Fallback to additive-only if too few rows exist.
+
+## Step 12: Apply rank-safe projection
+
+Sort predictable candidates by:
+
+```text
+AdditiveKld
+InteractionKld
+PredictedSizeBytes
+```
+
+Apply PAVA to interaction KLD values.
+
+Store:
+
+```text
+BaseRankSafeKld = projected KLD
+```
+
+## Step 13: Materialize predictions into DuckDB
+
+Persist:
+
+```text
+PredictedKld
+PredictedSizeBytes
+PredictionConfidence
+PredictionRank
+BaseRankSafeKld
+FinalPredictedKld
+```
+
+At this point, `FinalPredictedKld` equals `BaseRankSafeKld` unless anomaly rules are applied.
+
+## Step 14: Detect anomaly smoke
+
+Look for monotone downgrades versus higher-fidelity contextual twins.
+
+Use both:
+
+```text
+historical benchmark smoke
+DuckDB prediction-space smoke
+```
+
+Reject invalid sparse/native-exact anomaly configs.
+
+Require quantized contextual twins.
+
+## Step 15: Probe anomaly candidates
+
+For smoke candidates, build scoped probes:
+
+```text
+single-group
+pair
+composition
+full changed set
+```
+
+Benchmark probe and reference twin.
+
+Classify as beneficial, harmful, normal gravity, or suppression-only.
+
+## Step 16: Persist anomaly rules
+
+Create scoped rules from validated probe evidence.
+
+Beneficial rules reorder candidates beneath matching twins.
+
+Harmful rules demote matching rows.
+
+Suppression-only rules prevent repeated wasted probing.
+
+## Step 17: Query frontier candidates
+
+Use DuckDB to query candidates for:
+
+```text
+strict dominance
+near-baseline replacement
+interior better-than-linear discovery
+```
+
+Use prediction-space windows to select candidates.
+
+## Step 18: Build and benchmark normal prediction-guided candidates
+
+Prediction gets the candidate into the arena.
+
+Reality decides.
+
+## Step 19: Run smart baseline-tuning fallback after phase failure
+
+If the normal prediction-guided path fails to validate a winner for a strict, near-baseline, or interior window, optionally run the smart fallback.
+
+Start from the failed anchor's pure/uniform baseline blanket.
+
+Load SQLite/isolation truth:
+
+```text
+base-only anchors
+single-group isolation samples
+active group profile
+```
+
+Build guarded plans from isolated group improvements:
+
+```text
+free-lunch-same-or-smaller
+single-sensitive-group
+balanced-brain-protection
+sensitivity-first-blend
+```
+
+Limit attempts by:
+
+```text
+smart_fallback_attempts_per_failure
+```
+
+Reject plans that do not fit the phase's real size window.
+
+Then build and benchmark the selected fallback candidates.
+
+## Step 20: Accept or reject
+
+A candidate survives only if the real benchmark satisfies the phase contract.
+
+Strict dominance:
+
+```text
+actualSize <= anchorSize
+actualKld  < anchorKld
+```
+
+Interior:
+
+```text
+inside real size window
+actualKld < real local linear line
+```
+
+Near-baseline:
+
+```text
+inside allowed size premium
+actual KLD improvement justified by local tradeoff
+```
+
+## Step 21: Clean final frontier
+
+Apply:
+
+```text
+real dominance
+meaningful spacing
+final dominance
+```
+
+Export survivors and manifests.
+
+---
+
+# What MagicQuant Claims and What It Does Not Claim
+
+## MagicQuant claims
+
+MagicQuant claims:
+
+```text
+The prediction engine is good enough to identify candidates worth validating.
+```
+
+MagicQuant claims:
+
+```text
+Real benchmark truth owns final publication.
+```
+
+MagicQuant claims:
+
+```text
+Most quantization behavior follows gravity, but meaningful contextual violations exist.
+```
+
+MagicQuant claims:
+
+```text
+Validated anomalies should be exploited without pretending they are universal laws.
+```
+
+MagicQuant claims:
+
+```text
+If the main prediction path finds no validated winner,
+a small isolation-truth fallback can still test plausible free lunches
+without polluting the main prediction space.
+```
+
+MagicQuant claims:
+
+```text
+The final frontier should be useful, not cluttered with redundant micro-variants.
+```
+
+## MagicQuant does not claim
+
+MagicQuant does not claim:
+
+```text
+Predicted KLD is exact final KLD.
+```
+
+It does not claim:
+
+```text
+MDA is a perfect law.
+```
+
+It does not claim:
+
+```text
+Every local inversion deserves exhaustive search.
+```
+
+It does not claim:
+
+```text
+Smart fallback candidates are high-confidence global predictions.
+```
+
+It does not claim:
+
+```text
+Hybrids always beat baselines.
+```
+
+It does not claim:
+
+```text
+Q8 is the source of truth.
+```
+
+It does not claim:
+
+```text
+A Q6-over-Q8 anomaly means Q6 is universally better than Q8.
+```
+
+The actual claim is more useful:
+
+```text
+MagicQuant builds a practical, empirically grounded prediction space,
+uses it to spend benchmark compute intelligently,
+learns real contextual exceptions,
+and publishes only candidates that survive real validation.
+```
+
+---
+
+# Reimplementation Checklist
+
+If someone wanted to rebuild the core idea without copying code, they would need the following pieces.
+
+## Data model
+
+Track:
+
+```text
+architecture family
+model hash
+tensor group profile
+imatrix identity
+benchmark category
+baseline definitions
+tensor configs
+real benchmark results
+learned isolation samples
+anomaly probe sessions
+anomaly rules
+```
+
+## Tensor config system
+
+Represent:
+
+```text
+BaseQuant
+Embeddings
+LmHead
+AttnQ
+AttnKV
+AttnOutput
+FfnUpGate
+FfnDown
+MoeExperts
+MoeRouter
+```
+
+Each group slot should support:
+
+```text
+null/inherit base
+explicit baseline ID
+native exact alias
+unused group
+```
+
+## Effective quant resolver
+
+Implement:
+
+```text
+e_g(c) = override if present else base
+```
+
+Ignore unused groups.
+
+Normalize external baselines for prediction lookup when possible.
+
+## Isolation planner
+
+Build:
+
+```text
+Q8 exact-blanket base-only anchor
+single-group isolation samples for each active group/quant
+archival coverage for groups pruned out of current search
+```
+
+## Additive predictor
 
 Compute:
 
@@ -1500,435 +2852,191 @@ Compute:
 A(c) = Σ D(g, e_g(c))
 ```
 
-If required isolation data is missing, mark the candidate as not safely predictable.
+Use measured Q8 KLD for Q8.
 
-## Step 8: Predict Size
+Use zero only for native exact aliases.
 
-Compute predicted size from base-only size anchors and isolated size deltas.
-
-If required size anchors are missing, mark the candidate as unsafe for size-based selection.
-
-## Step 9: Fit Interaction Correction
-
-Using existing real benchmark rows in the current bucket:
-
-1. Try candidate bit-stress thresholds.
-    
-2. Compute cross-terms.
-    
-3. Fit `α` and `β`.
-    
-4. Choose the threshold with the best error.
-    
-5. Fall back to additive-only behavior if too few rows exist.
-    
-
-## Step 10: Compute Interaction Estimate
+## Size predictor
 
 Compute:
 
 ```text
-Y(c) = α × A(c) + β × X_B(c)
+Ŝ(c) = S_base(base(c)) + Σ [S_iso(g, e_g(c)) - S_q8_exact]
 ```
 
-## Step 11: Apply Rank-Safe Projection
+## Interaction model
 
-Sort predictable rows by additive damage, interaction damage, and size.
-
-Apply PAVA.
-
-The resulting projected value becomes:
+For benchmarked rows:
 
 ```text
-PredictedKld(c)
+X_B(c) = Σ D_iD_jstress_i stress_j
+Y(c) = αA(c) + βX_B(c)
 ```
 
-## Step 12: Select Candidate Attempts
+Fit alpha/beta per threshold and choose lowest MAE.
 
-Use prediction to identify candidates for:
+Fallback to additive-only when too little truth exists.
+
+## Rank-safe projection
+
+Sort by:
 
 ```text
-strict dominance replacement
+A(c), Y(c), Ŝ(c)
+```
+
+Apply PAVA:
+
+```text
+minimize Σ(Z_i - Y_i)^2
+subject to monotonic Z in additive order
+```
+
+Store:
+
+```text
+BaseRankSafeKld = Z(c)
+```
+
+## DuckDB ranking
+
+Materialize:
+
+```text
+PredictedKld
+PredictedSizeBytes
+PredictionConfidence
+PredictionRank
+BaseRankSafeKld
+FinalPredictedKld
+```
+
+Query directly from DuckDB for frontier windows.
+
+## Bad-trade pruning
+
+Remove small-size-gain candidates with disproportionate KLD/PPL damage.
+
+Keep mixed tradeoffs.
+
+## Candidate selection
+
+Implement:
+
+```text
+strict dominance
 near-baseline replacement
-interior subspace discovery
+interior better-than-linear discovery
+normal DuckDB fallback attempts
+real validation
 ```
 
-Keep only a limited number of fallback attempts per anchor/window.
+## Smart baseline-tuning fallback
 
-## Step 13: Build and Benchmark Candidates
-
-For each selected candidate:
+Implement a separate post-failure fallback path:
 
 ```text
-quantize
-benchmark
-load real snapshot
-evaluate actual size/KLD against expected outcome
+enabled only after normal phase failure
+starts from pure/uniform baseline blankets
+loads SQLite/base-only/isolation truth
+builds group options only from isolated KLD improvements
+limits higher-fidelity climbs
+creates free-lunch and protected-budget plans
+uses a small attempt limit
+marks candidates as sqlite-isolation-fallback
+validates with the same real phase contract
 ```
 
-## Step 14: Accept or Reject by Outcome
-
-Do not accept based on prediction error.
-
-Accept only if the real benchmark satisfies the reason it was selected.
-
-## Step 15: Final Dominance and Spacing
-
-Merge accepted candidates with existing anchors.
-
-Remove dominated models.
-
-Collapse meaningless near-neighbor clutter.
-
-Export the final survivor set.
-
----
-
-# 23. Pseudocode
+Required strategies:
 
 ```text
-for each scoped model/imatrix bucket:
+free-lunch-same-or-smaller
+single-sensitive-group
+balanced-brain-protection
+sensitivity-first-blend
+```
 
-    active_groups = detect_active_tensor_groups(model)
+Do not let this fallback contaminate the primary DuckDB ranking space.
 
-    pure_baselines = benchmark_pure_baselines()
+## Anomaly detection
 
-    q8_exact_blanket = benchmark_exact_blanket(base=Q8_0)
+Implement contextual quantized twin comparisons:
 
-    isolation_library = {}
+```text
+reference = all active groups at Q8/Q6/etc. context
+candidate = monotone downgrade from reference
+```
 
-    for group in active_groups:
-        for quant in candidate_quants:
-            sample = benchmark(
-                base=Q8_0,
-                all_groups=exact,
-                override[group]=quant
-            )
+Reject BF16/native-exact anomaly configs.
 
-            isolation_library[group, quant] = sample.KLD
+Probe subsets of changed groups.
 
-    candidates = generate_hybrid_candidates()
+Classify:
 
-    for candidate in candidates:
+```text
+beneficial
+harmful
+normal gravity
+suppression-only
+```
 
-        additive = 0
+## Anomaly prediction adjustment
 
-        for group in active_groups:
-            effective = candidate.override[group] or candidate.base
+Keep normal prediction and anomaly exceptions separate:
 
-            if effective is Q8_0 or exact:
-                damage = 0
-            else:
-                damage = isolation_library[group, effective]
+```text
+BaseRankSafeKld      = gravity prediction
+AnomalyAdjustmentKld = scoped exception adjustment
+FinalPredictedKld    = adjusted prediction
+```
 
-            additive += damage
+Beneficial rules should be pairwise twin ordering, not universal boosts.
 
-        candidate.additive_kld = additive
-        candidate.predicted_size = predict_size(candidate)
+Harmful rules can demote matching patterns.
 
-    fit = fit_bit_stress_interaction(candidates_with_real_truth)
+## Final release cleanup
 
-    for candidate in candidates:
-        cross = compute_pairwise_bit_stress_cross_term(candidate)
-        candidate.interaction_kld = fit.alpha * candidate.additive_kld + fit.beta * cross
+Apply:
 
-    candidates.predicted_kld = rank_safe_projection(
-        order_by = additive_kld,
-        values   = interaction_kld
-    )
-
-    attempts = select_predicted_candidates(candidates)
-
-    for attempt in attempts:
-        real = build_and_benchmark(attempt)
-
-        if satisfies_expected_outcome(real, attempt.reason):
-            accept(real)
-        else:
-            reject(real)
-
-    survivors = final_dominance_and_spacing_pass(accepted + pure_baselines)
-
-    export(survivors)
+```text
+real dominance
+meaningful spacing
+final dominance
+export manifests
+clone configs
+hybrid maps
+replacement logs
+bad-trade logs
 ```
 
 ---
 
-# 24. How to Explain the Accuracy
+# Final Summary
 
-The most honest way to describe MagicQuant prediction accuracy is not:
+MagicQuant works because it refuses two bad extremes.
 
-```text
-It predicts KLD perfectly.
-```
+It does not brute-force the universe.
 
-It is:
+It also does not blindly trust a simplistic predictor.
 
-```text
-It predicts the useful search frontier with high practical accuracy, then validates every selected survivor with real benchmarks.
-```
+Instead, it builds a practical prediction space from isolated tensor-group measurements, stabilizes that space with monotonic rank projection, uses fitted interaction correction where enough truth exists, keeps subtle bad-trade-adjacent ideas out of the main ranking space, recovers a few of them through guarded smart fallback when prediction fails, detects contextual violations of gravity through Q8-style quantized twins, and validates every serious candidate with real benchmarks.
 
-The accuracy should be reported in several layers.
-
-## 24.1 Numeric Error
-
-Useful metrics:
+The system’s deepest idea is not merely:
 
 ```text
-MAE
-RMSE
-max absolute error
-mean signed error
-relative error
+hybrid quantization can beat baselines
 ```
 
-These answer:
+The deeper idea is:
 
 ```text
-How close were predicted KLD values to actual KLD values?
+hybrid quantization search can be made practical by separating prediction from truth.
 ```
 
-## 24.2 Rank Accuracy
+Prediction space finds the big doors.
 
-Useful metrics:
+Smart fallback checks whether a tiny side door was hiding in the isolated measurements.
 
-```text
-pairwise order accuracy
-Spearman correlation
-Kendall tau
-rank distance
-within-one-rank count
-within-two-ranks count
-within-five-ranks count
-```
+Benchmarks decide which doors actually open.
 
-These answer:
-
-```text
-Did the predictor order candidates correctly?
-```
-
-For MagicQuant, rank accuracy is often more important than raw KLD error because candidate selection depends heavily on frontier ordering.
-
-## 24.3 Outcome Accuracy
-
-This is the most important pipeline metric.
-
-Useful metrics:
-
-```text
-accepted predicted candidates
-rejected predicted candidates
-strict dominance success rate
-near-baseline success rate
-interior discovery success rate
-fallback success rate
-final survivor count
-dominance eliminations
-spacing eliminations
-```
-
-These answer:
-
-```text
-Did predictions lead to real useful models?
-```
-
-That is the metric users should care about most.
-
-## 24.4 Noise-Aware Accuracy
-
-MagicQuant should also distinguish:
-
-```text
-wrong but inside noise
-wrong and measurable
-wrong and final-rank-changing
-```
-
-These are not the same.
-
-A prediction that reverses two candidates separated by microscopic KLD is not as important as one that incorrectly replaces a major anchor.
-
-This is why the docs should avoid treating all prediction misses as equal.
-
----
-
-# 25. Recommended Language for Documentation
-
-Use language like:
-
-```text
-MagicQuant is isolation-grounded and rank-safe.
-```
-
-```text
-The predictor is not omniscient; it is a practical search-space reduction engine.
-```
-
-```text
-Predictions nominate candidates. Real benchmarks decide survivors.
-```
-
-```text
-The additive isolation backbone provides rank discipline.
-```
-
-```text
-The bit-stress interaction estimator improves numeric fit in low-bit regions.
-```
-
-```text
-The rank-safe projection prevents the interaction estimator from inventing unstable local ordering.
-```
-
-```text
-Plateaus are uncertainty, not failure.
-```
-
-```text
-MagicQuant does not fight for pennies.
-```
-
-```text
-A hybrid survives only if it earns a meaningful size/fidelity slot.
-```
-
-Avoid language like:
-
-```text
-MagicQuant always finds the best possible quant.
-```
-
-```text
-The predictor is always correct.
-```
-
-```text
-Every lower KLD value is meaningful.
-```
-
-```text
-Hybrids are always better than baselines.
-```
-
-Those claims are weaker because they are too absolute.
-
-The real story is better anyway.
-
-MagicQuant is impressive because it is honest.
-
----
-
-# 26. Beginner Explanation
-
-Imagine you are trying to find the best way to compress a model.
-
-The impossible way is:
-
-```text
-Try every possible compression choice for every part of the model.
-```
-
-That explodes instantly.
-
-MagicQuant does something smarter.
-
-It asks:
-
-```text
-What happens if I compress only this one part?
-What happens if I compress only that one part?
-What happens if I do this for every major part?
-```
-
-Then it builds a map of how each part behaves.
-
-Once it has that map, it can estimate what will happen when multiple parts are compressed together.
-
-Most of the time, damage adds up in a predictable way.
-
-Sometimes low-bit compression makes groups interact weirdly, so MagicQuant adds an interaction correction.
-
-Then it forces the final prediction to respect the stable order learned from isolated measurements.
-
-Finally, it tests the best-looking candidates for real.
-
-If the real test fails, the candidate is thrown away.
-
-That is MagicQuant in one breath.
-
----
-
-# 27. Advanced Explanation
-
-MagicQuant treats hybrid quantization as a structured prediction problem over tensor-group effective baseline assignments.
-
-The core assumption is that the measured KLD contribution of a group under a Q8-carrier native-exact blanket provides a transferable marginal damage estimate for that group’s effective quantization state.
-
-The first estimator constructs an additive functional over group states:
-
-```text
-A(c) = Σ_g D(g, e_g(c))
-```
-
-This additive functional is used primarily as a rank prior.
-
-A second estimator augments the additive functional with a low-bit pairwise stress term:
-
-```text
-Y(c) = αA(c) + βΣ_{g<h}D_gD_h max(0, B-b_g)max(0, B-b_h)
-```
-
-The threshold `B` and coefficients are selected per bucket against available benchmark truth.
-
-The final estimator performs an isotonic projection of `Y` onto the partial order induced by `A`, producing the closest monotone sequence to the interaction estimator while preserving additive rank discipline:
-
-```text
-Z* = argmin_Z Σ_i (Z_i - Y_i)^2
-subject to Z_i ≤ Z_j whenever A_i ≤ A_j in sorted order
-```
-
-PAVA computes this projection efficiently.
-
-The projection converts local estimator disagreement into plateaus. These plateaus are semantically useful because they express uncertainty rather than overfitted micro-rankings.
-
-Candidate selection then uses the projected KLD and predicted size to nominate strict replacements, near-baseline replacements, and interior better-than-linear candidates.
-
-Every candidate is physically built and benchmarked before acceptance.
-
-The predictor therefore controls benchmark allocation, not final truth.
-
----
-
-# 28. Final Summary
-
-MagicQuant’s prediction engine is powerful because it combines three ideas that fit the real physics of quantized models:
-
-1. **Monotonic degradation is overwhelmingly common.**  
-    Higher-fidelity quantization usually produces equal or lower KLD when the rest of the model is held constant.
-    
-2. **Isolated tensor-group measurements are highly informative.**  
-    Single-group Q8-carrier exact-blanket probes provide a reusable physical map of marginal group damage.
-    
-3. **Rank-safe projection prevents fake certainty.**  
-    The system uses interaction correction where helpful, but forces final predictions to respect the stable additive isolation order unless uncertainty collapses values into plateaus.
-    
-
-The result is not a perfect oracle.
-
-It is something better for real engineering:
-
-```text
-a fast, honest, empirically grounded search engine
-that spends benchmarks where they matter
-and lets real benchmark validation decide what survives.
-```
-
-MagicQuant does not need to be omniscient.
-
-It needs to be right where it counts.
-
-And when it is wrong, it needs to fail safely.
-
-That is exactly what the pipeline is built to do.
+That is the engine.
