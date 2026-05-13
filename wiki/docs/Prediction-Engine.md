@@ -86,8 +86,10 @@ From there, MagicQuant asks sharper questions:
 Can this candidate strictly dominate an existing anchor?
 Can it replace a nearby baseline with enough KLD improvement?
 Can it land between two anchors and beat the boring linear tradeoff line?
+Can a known synergistic peer group rescue a candidate that bad-trade pruning removed too aggressively?
 Can a small guarded fallback recover an isolation-proven free lunch if the main prediction path finds nothing?
 Can it expose a real anomaly where lower-bit choices beat their higher-bit twins?
+Can isolated truth prove that a lower-declared-bit choice should inherit higher-bit stress behavior?
 ```
 
 If a candidate passes prediction-space selection, it is physically built and benchmarked.
@@ -100,7 +102,10 @@ That is MagicQuant:
 
 ```text
 Measure local physics.
+Prune aggressively.
+Second-chance known synergies when pruning may have clipped useful search space.
 Predict the frontier.
+Let isolated lower-bit winners inherit the stress truth they earned.
 Try guarded free lunches only when prediction fails.
 Probe suspicious violations.
 Validate in reality.
@@ -247,6 +252,52 @@ and the requested size window still has room.
 ```
 
 Brain protection is how the fallback can sometimes discover nonlinear premium or interior winners that the main prediction space did not select.
+
+## Tensor group synergy
+
+A static, explicit relationship between tensor groups whose downstream hybrid behavior can be coupled enough that pruning one group in isolation may accidentally remove useful combined search space.
+
+The current hardcoded synergy is:
+
+```text
+ffn_up_gate + ffn_down
+```
+
+This does not mean the groups are merged. They still have separate measurements, separate effective quantization states, and separate additive KLD contributions.
+
+It means MagicQuant knows they are connected enough to deserve one narrow post-pruning recovery pass.
+
+## Synergy second-chance review
+
+A post-bad-trade review pass for tensor group synergies.
+
+If a quant survives in one member of a synergy group but is removed from the other member purely by bad-trade pruning, MagicQuant can ask the bad-trade question again with one deliberate rule change:
+
+```text
+ignore PPL as an elimination signal
+keep KLD bad-trade logic active
+```
+
+If the candidate no longer fails the KLD-only review against the original bad-trade anchor, it is restored for that group.
+
+This is not a broad rescue mechanism. It does not rescue dominance removals, equivalent-truth collapses, final cleanup removals, unsupported states, or candidates that still fail the KLD-only bad-trade check.
+
+## Isolation bit-truth override
+
+A bit-stress exception earned by isolated measurements.
+
+Normally, interaction stress uses a quant's declared bit range:
+
+```text
+Q8_0      => about 8-bit stress truth
+Q6_K      => about 6-bit stress truth
+Q4_K      => about 4-bit stress truth
+UD-IQ3_S  => about 3-bit stress truth
+```
+
+But if a lower-declared-bit candidate is same-size-or-smaller and lower-KLD than a higher-declared-bit candidate in the same isolated group, MagicQuant treats the lower-bit candidate as having inherited the highest stress bit truth it defeated for that group/baseline pair.
+
+This does not rewrite the real quantization. It does not make the candidate globally Q8. It only prevents the interaction model from punishing an isolated-proven winner as if its declared bit range were the whole story.
 
 ---
 
@@ -796,6 +847,61 @@ IQ2_* => stress 6
 
 The lower the bit range, the higher the stress.
 
+## Isolation bit-truth overrides
+
+Declared bit range is the default, not the final word.
+
+If isolated sampling proves that a lower-declared-bit candidate dominates a higher-declared-bit candidate for the same tensor group, MagicQuant allows the lower-bit candidate to inherit the higher bit range for **bit-stress purposes only**.
+
+The test is intentionally simple:
+
+```text
+same group
+candidate declared bits < victim declared bits
+candidate.size <= victim.size
+candidate.kld  < victim.kld - epsilon
+```
+
+When that happens:
+
+```text
+stress bits(group, candidate) = max(candidate declared bits, highest dominated victim bits)
+```
+
+So if `UD-IQ3_S` in `embeddings` beats a higher-fidelity `Q8_0` isolation state, the interaction model can treat that `embeddings + UD-IQ3_S` state as roughly 8-bit stress truth instead of naïve 3-bit stress truth.
+
+This matters because some Unsloth Dynamic-style artifacts are not simple uniform low-bit shrinks. A file labeled around a 3-bit family may protect important tensors heavily enough that its actual isolated behavior is closer to a higher-fidelity state. In that case, applying normal low-bit stress would punish the candidate for a label rather than for measured local physics.
+
+A real example shape from Qwen3.6 35B A3B looked like this:
+
+```text
+embeddings = UD-IQ3_S
+```
+
+The candidate was not just small and reckless. It isolated extremely well, with lower KLD than higher-declared-bit alternatives in that group. Under the old bit-stress logic, that state could be thrown into the predictive swamp because the interaction correction saw “3-bit” and inflated the expected low-bit damage. Under bit-truth inheritance, it earns the stress behavior of the strongest higher-fidelity state it actually defeated.
+
+The boundary is important:
+
+```text
+additive KLD still uses measured isolation KLD
+predicted size still uses measured size deltas
+real benchmark truth still decides survival
+only bit-stress interaction pressure is adjusted
+```
+
+So the rule is not:
+
+```text
+lower bit is secretly always higher bit
+```
+
+It is:
+
+```text
+when isolated truth proves a lower-bit state beat a higher-bit state,
+do not let declared bit stress erase that truth before the candidate gets considered
+```
+
 ## Pairwise cross-term
 
 For each pair of active groups, MagicQuant computes:
@@ -1198,6 +1304,90 @@ This is part of the bigger philosophy:
 ```text
 practical frontier discovery > exhaustive worship of every possible combination
 ```
+
+## Synergy-aware second chance after bad trades
+
+Bad-trade pruning is necessary, but it is still local.
+
+That means it can sometimes over-prune a quant that looks uncomfortable in one tensor group by itself but becomes useful when paired with a related group. The first hardcoded example is the feed-forward relationship:
+
+```text
+ffn_up_gate + ffn_down
+```
+
+These groups are still measured separately. The synergy registry does not merge them and does not create a fuzzy runtime heuristic. It only says:
+
+```text
+if a quant survived in one feed-forward peer,
+and that same quant was removed from the other peer only by bad-trade pruning,
+then it may deserve one KLD-only second chance
+```
+
+The second-chance pass runs after normal group bad-trade pruning has retained the original bad-trade decisions.
+
+For each synergy group, MagicQuant checks:
+
+```text
+1. Was candidate q removed from group g by bad-trade pruning?
+2. Does q still survive in a peer group from the same synergy registry entry?
+3. Is q still banned for g?
+4. Does q pass the same bad-trade review if PPL is ignored?
+```
+
+The fourth question is the key alteration.
+
+Normal bad-trade pruning can eliminate on either disproportionate KLD damage or disproportionate PPL damage. During synergy second chance, PPL is deliberately blinded:
+
+```text
+normal review:
+    small size gain + disproportionate KLD damage => remove
+    small size gain + disproportionate PPL damage => remove
+
+synergy second chance:
+    small size gain + disproportionate KLD damage => keep removed
+    small size gain + disproportionate PPL damage => do not remove by itself
+```
+
+This is a blessing-and-curse choice. PPL volatility can be a useful smoke signal, but in this specific post-pruning recovery pass it is allowed to be too conservative. The goal is not to trust the candidate. The goal is to allow a narrow slice of synergy-backed opportunity space to survive long enough for prediction and real benchmarking to judge it.
+
+The pass does not rescue candidates removed by dominance, equivalent-truth pruning, final KLD cleanup, unsupported combinations, or hard damage rules. It only reviews retained bad-trade removals.
+
+## Example: Qwen3.6 35B A3B feed-forward restoration
+
+This architecture is a strong example because the feed-forward/expert space dominates so much of the model that small local pruning decisions can erase almost the entire hybrid opportunity surface.
+
+In one run, `ffn_down` retained higher-bit feed-forward candidates such as `Q6_K` and `UD-Q6_K`, while `ffn_up_gate` had pruned them under normal bad-trade rules. The synergy pass restored the matching candidates into `ffn_up_gate` because they survived in `ffn_down` and passed KLD-only review against their original anchors:
+
+| Restored into |       Quant | Original anchor | Why restored                                             |
+| ------------- | ----------: | --------------: | -------------------------------------------------------- |
+| `ffn_up_gate` |      `Q6_K` |    `UD-Q6_K_XL` | Survived in `ffn_down`; KLD-only bad-trade review passed |
+| `ffn_up_gate` |   `UD-Q6_K` |    `UD-Q6_K_XL` | Survived in `ffn_down`; KLD-only bad-trade review passed |
+| `ffn_up_gate` | `UD-Q5_K_M` |    `UD-Q5_K_XL` | Survived in `ffn_down`; KLD-only bad-trade review passed |
+| `ffn_up_gate` | `UD-Q5_K_S` |    `UD-Q5_K_XL` | Survived in `ffn_down`; KLD-only bad-trade review passed |
+
+The same run restored lower-bit choices into `ffn_down` because those choices survived in `ffn_up_gate`:
+
+| Restored into |        Quant | Original anchor | Why restored                                                |
+| ------------- | -----------: | --------------: | ----------------------------------------------------------- |
+| `ffn_down`    |     `IQ4_XS` |        `Q5_K_S` | Survived in `ffn_up_gate`; KLD-only bad-trade review passed |
+| `ffn_down`    |    `IQ3_XXS` |    `UD-IQ3_XXS` | Survived in `ffn_up_gate`; KLD-only bad-trade review passed |
+| `ffn_down`    |      `IQ2_M` |    `UD-IQ3_XXS` | Survived in `ffn_up_gate`; KLD-only bad-trade review passed |
+| `ffn_down`    |  `UD-IQ4_XS` |        `Q5_K_S` | Survived in `ffn_up_gate`; KLD-only bad-trade review passed |
+| `ffn_down`    |  `UD-Q3_K_M` |        `Q5_K_S` | Survived in `ffn_up_gate`; KLD-only bad-trade review passed |
+| `ffn_down`    | `UD-Q3_K_XL` |        `Q5_K_S` | Survived in `ffn_up_gate`; KLD-only bad-trade review passed |
+| `ffn_down`    |  `UD-Q4_K_S` |        `Q5_K_S` | Survived in `ffn_up_gate`; KLD-only bad-trade review passed |
+
+This is not MagicQuant getting softer everywhere.
+
+It is MagicQuant saying:
+
+```text
+pruning is critical,
+but known coupled groups deserve a narrow pressure-release valve,
+because the best final hybrid may need both sides of that coupling available
+```
+
+Without this recovery, some MOE-heavy architectures may produce few or no hybrids even when meaningful hybrids are actually achievable. With too much recovery, the prediction space becomes fuzzy and noisy. The synergy mechanism is the balance point: explicit, rare, traceable, and still subordinate to real benchmark validation.
 
 ## Equivalent-truth pruning
 
@@ -1913,7 +2103,35 @@ What does this group look like against native-exact surroundings?
 Anomaly probing asks:
 
 ```text
-What happens if this lower-bit move is made inside the quantized neighborhood where the final hybrid actually lives?
+Does this lower-fidelity movement behave differently in a real quantized context?
+```
+
+## Known blind spot: high-bit truth does not always transfer downward
+
+Anomaly detection is powerful, but it is not omniscient.
+
+Normal isolation and the current anomaly probes intentionally sample a limited number of high-signal contexts. That keeps MagicQuant practical. Testing every possible low-bit blanket, every pair, every triple, and every surrounding quantization condition would explode the sample count.
+
+A useful example shape is a group where `IQ4_NL` looks unusually strong in isolation or in a 4-bit-and-above context. It may beat `Q4_K` by a meaningful amount when the surrounding groups are Q8/native exact or otherwise high fidelity.
+
+But that does not guarantee the relationship survives in 3-bit-or-lower territory.
+
+In very low-bit contexts, the surrounding damage field changes. A quant that hit above its weight class near Q8/BF16 may stop doing so once other groups are also heavily compressed. In that territory, a `Q4_K` choice that looked worse in high-bit isolation can become the better practical companion.
+
+This is an accepted blind spot of the current practical engine:
+
+```text
+high-bit isolation truth is highly useful
+but it is not a complete map of low-bit emergent behavior
+```
+
+MagicQuant could add more low-bit context isolation in the future, such as 3-bit blanket probes or targeted low-bit transfer checks. The tradeoff is sample growth. At present, the system chooses the practical path: respect the limited truth it has, acknowledge where that truth can fail, and let the other mechanisms — bit-stress fitting, anomaly probes, synergy second chance, fallback attempts, and real validation — power through most cases without brute-forcing the entire universe.
+
+The important contract remains:
+
+```text
+prediction may miss some low-bit context flips
+real benchmark truth still decides what survives
 ```
 
 ## Movement classification
@@ -2406,7 +2624,19 @@ ffn_up_gate
 ffn_down
 ```
 
-## Step 3: Build pure baselines
+## Step 3: Define explicit tensor group synergies
+
+Load the static synergy registry.
+
+The current hardcoded synergy is:
+
+```text
+ffn_up_gate + ffn_down
+```
+
+Keep this registry small and explicit. Synergy is an architectural exception, not a general fuzzy rescue rule.
+
+## Step 4: Build pure baselines
 
 Benchmark pure baselines and external baselines:
 
@@ -2422,7 +2652,7 @@ other configured custom baselines
 
 These become real anchors.
 
-## Step 4: Build the Q8 exact-blanket base-only anchor
+## Step 5: Build the Q8 exact-blanket base-only anchor
 
 Create:
 
@@ -2435,7 +2665,7 @@ Benchmark it.
 
 This is the exact-blanket reference for normal isolation.
 
-## Step 5: Build single-group isolation samples
+## Step 6: Build single-group isolation samples
 
 For every active group `g` and target quant `q`:
 
@@ -2455,19 +2685,46 @@ PPL(g, q)
 
 Do not treat Q8 as zero damage. Q8 has measured isolated truth.
 
-## Step 6: Generate candidate space
+## Step 7: Generate candidate space
 
 Generate candidate tensor configurations from allowed base quants and group choices.
 
 Apply runtime bans, unsupported combinations, unused groups, and search-space policy.
 
-## Step 7: Prune bad trades
+## Step 8: Prune bad trades
 
 Within each group, remove candidates that offer tiny size savings but disproportionate damage.
 
 Keep mixed tradeoffs where a candidate meaningfully improves one metric while worsening another.
 
-## Step 8: Compute effective quantization
+Retain structured bad-trade removals, including:
+
+```text
+removed group
+removed candidate
+accepted anchor
+original bad-trade reason
+KLD/PPL/size values
+```
+
+That retained provenance is what makes synergy second chance possible.
+
+## Step 9: Apply synergy second-chance review
+
+For each static synergy group, compare survivor sets across peer groups.
+
+If candidate `q` survived in one peer but was removed from another peer only by bad-trade pruning, review it again against the original anchor with PPL ignored:
+
+```text
+small size gain + disproportionate KLD damage => keep removed
+small size gain + disproportionate PPL damage => allow restoration
+```
+
+If the KLD-only bad-trade check passes, unban the candidate for that group and record a synergy second-chance reinstatement.
+
+Do not restore dominance removals, equivalent-truth collapses, final cleanup removals, unsupported choices, or candidates that still fail KLD-only review.
+
+## Step 10: Compute effective quantization
 
 For every candidate and active group:
 
@@ -2478,7 +2735,7 @@ e_g(c) = override_g(c) if override exists
 
 Normalize external baseline IDs for isolation lookup when safe.
 
-## Step 9: Compute additive KLD
+## Step 11: Compute additive KLD
 
 ```text
 A(c) = Σ D(g, e_g(c))
@@ -2486,7 +2743,7 @@ A(c) = Σ D(g, e_g(c))
 
 If required isolation data is missing, mark candidate not safely predictable.
 
-## Step 10: Compute predicted size
+## Step 12: Compute predicted size
 
 ```text
 Ŝ(c) = S_base(base(c)) + Σ [S_iso(g, e_g(c)) - S_q8_exact]
@@ -2494,7 +2751,21 @@ If required isolation data is missing, mark candidate not safely predictable.
 
 If size anchors are missing, mark candidate unsafe for size selection.
 
-## Step 11: Fit interaction correction
+## Step 13: Build isolation bit-truth overrides
+
+For each active group, compare isolated candidate states against higher-declared-bit states.
+
+If a lower-declared-bit candidate is same-size-or-smaller and lower-KLD than a higher-declared-bit victim, record the highest defeated bit range:
+
+```text
+stressBits(g, q) = max(declaredBits(q), highestDominatedVictimBits)
+```
+
+This override is used only by the bit-stress interaction correction.
+
+Additive KLD, size prediction, and final validation remain based on measured truth.
+
+## Step 14: Fit interaction correction
 
 Use existing real benchmark rows in the current bucket.
 
@@ -2502,6 +2773,12 @@ For thresholds `B`, compute:
 
 ```text
 X_B(c) = Σ D_iD_jstress_i stress_j
+```
+
+Where:
+
+```text
+stress_i = max(0, B - stressBits(group_i, effectiveQuant_i))
 ```
 
 Fit:
@@ -2514,7 +2791,7 @@ Choose the threshold with lowest MAE.
 
 Fallback to additive-only if too few rows exist.
 
-## Step 12: Apply rank-safe projection
+## Step 15: Apply rank-safe projection
 
 Sort predictable candidates by:
 
@@ -2532,7 +2809,7 @@ Store:
 BaseRankSafeKld = projected KLD
 ```
 
-## Step 13: Materialize predictions into DuckDB
+## Step 16: Materialize predictions into DuckDB
 
 Persist:
 
@@ -2547,7 +2824,7 @@ FinalPredictedKld
 
 At this point, `FinalPredictedKld` equals `BaseRankSafeKld` unless anomaly rules are applied.
 
-## Step 14: Detect anomaly smoke
+## Step 17: Detect anomaly smoke
 
 Look for monotone downgrades versus higher-fidelity contextual twins.
 
@@ -2562,7 +2839,9 @@ Reject invalid sparse/native-exact anomaly configs.
 
 Require quantized contextual twins.
 
-## Step 15: Probe anomaly candidates
+Remember the scope limit: anomaly smoke is not an exhaustive low-bit context map.
+
+## Step 18: Probe anomaly candidates
 
 For smoke candidates, build scoped probes:
 
@@ -2577,7 +2856,7 @@ Benchmark probe and reference twin.
 
 Classify as beneficial, harmful, normal gravity, or suppression-only.
 
-## Step 16: Persist anomaly rules
+## Step 19: Persist anomaly rules
 
 Create scoped rules from validated probe evidence.
 
@@ -2587,7 +2866,7 @@ Harmful rules demote matching rows.
 
 Suppression-only rules prevent repeated wasted probing.
 
-## Step 17: Query frontier candidates
+## Step 20: Query frontier candidates
 
 Use DuckDB to query candidates for:
 
@@ -2599,13 +2878,13 @@ interior better-than-linear discovery
 
 Use prediction-space windows to select candidates.
 
-## Step 18: Build and benchmark normal prediction-guided candidates
+## Step 21: Build and benchmark normal prediction-guided candidates
 
 Prediction gets the candidate into the arena.
 
 Reality decides.
 
-## Step 19: Run smart baseline-tuning fallback after phase failure
+## Step 22: Run smart baseline-tuning fallback after phase failure
 
 If the normal prediction-guided path fails to validate a winner for a strict, near-baseline, or interior window, optionally run the smart fallback.
 
@@ -2638,7 +2917,7 @@ Reject plans that do not fit the phase's real size window.
 
 Then build and benchmark the selected fallback candidates.
 
-## Step 20: Accept or reject
+## Step 23: Accept or reject
 
 A candidate survives only if the real benchmark satisfies the phase contract.
 
@@ -2663,7 +2942,7 @@ inside allowed size premium
 actual KLD improvement justified by local tradeoff
 ```
 
-## Step 21: Clean final frontier
+## Step 24: Clean final frontier
 
 Apply:
 
@@ -2742,6 +3021,12 @@ Every local inversion deserves exhaustive search.
 It does not claim:
 
 ```text
+High-bit isolation truth always transfers perfectly into low-bit contexts.
+```
+
+It does not claim:
+
+```text
 Smart fallback candidates are high-confidence global predictions.
 ```
 
@@ -2794,6 +3079,8 @@ real benchmark results
 learned isolation samples
 anomaly probe sessions
 anomaly rules
+bad-trade pruning diagnostics
+synergy second-chance reinstatement diagnostics
 ```
 
 ## Tensor config system
@@ -2844,6 +3131,28 @@ single-group isolation samples for each active group/quant
 archival coverage for groups pruned out of current search
 ```
 
+## Synergy registry and bad-trade provenance
+
+Implement a static tensor-group synergy registry.
+
+At minimum, the current known synergy is:
+
+```text
+ffn_up_gate + ffn_down
+```
+
+During bad-trade pruning, retain structured records of bad-trade removals so a later synergy pass can review only those removals.
+
+The second-chance pass should:
+
+```text
+look for the same quant surviving in a peer synergy group
+reuse the original accepted anchor
+ignore PPL as an elimination signal
+keep KLD bad-trade rejection active
+restore only candidates removed by bad-trade pruning
+```
+
 ## Additive predictor
 
 Compute:
@@ -2865,6 +3174,10 @@ Compute:
 ```
 
 ## Interaction model
+
+Before computing stress, derive group/baseline stress bit ranges.
+
+Declared bit range is the default. If isolated sampling shows a lower-declared-bit candidate is same-size-or-smaller and lower-KLD than a higher-declared-bit candidate in the same group, let it inherit the highest defeated bit range for interaction stress only.
 
 For benchmarked rows:
 
